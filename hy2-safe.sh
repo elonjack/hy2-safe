@@ -28,8 +28,13 @@ readonly STATE_DIR="/var/lib/hysteria"
 readonly SERVICE_PATH="/etc/systemd/system/hysteria-server.service"
 readonly UPDATE_SERVICE_PATH="/etc/systemd/system/hy2-safe-update.service"
 readonly UPDATE_TIMER_PATH="/etc/systemd/system/hy2-safe-update.timer"
+readonly NOTIFIER_PATH="/usr/local/libexec/hy2-safe-notifier.py"
+readonly NOTIFIER_CONFIG_PATH="${CONFIG_DIR}/telegram-notifier.json"
+readonly NOTIFIER_SERVICE_PATH="/etc/systemd/system/hy2-safe-notifier.service"
+readonly NOTIFIER_STATE_DIR="/var/lib/hy2-safe-notifier"
 readonly SERVICE_NAME="hysteria-server.service"
 readonly TIMER_NAME="hy2-safe-update.timer"
+readonly NOTIFIER_NAME="hy2-safe-notifier.service"
 readonly LOCK_PATH="/run/lock/hy2-safe.lock"
 
 QUIET=0
@@ -68,6 +73,10 @@ hy2-safe - 安全、精简的 Hysteria 2 服务端管理器
   hy2-safe show-client
   hy2-safe status
   hy2-safe logs
+  hy2-safe telegram-setup [--token-file FILE --chat-id ID]
+  hy2-safe telegram-test
+  hy2-safe telegram-logs
+  hy2-safe telegram-disable
   hy2-safe uninstall
 
 install/configure 选项：
@@ -97,6 +106,7 @@ install/configure 选项：
   - 不会清空现有防火墙链，也不会修改 UFW、firewalld 或云安全组。
   - 端口跳跃会让 Hysteria 原生创建并在停止时清理自己的 nftables/iptables 临时规则。
   - ACME 通常还需要放行 TCP 80/443；Hysteria 数据端口需要放行 UDP。
+  - Telegram 提醒默认关闭；启用后只向设置时确认的私人 Chat ID 发消息。
 EOF
 }
 
@@ -357,6 +367,16 @@ wait_for_service() {
   return 0
 }
 
+wait_for_unit() {
+  local unit="$1"
+  local _
+  for _ in 1 2 3 4 5; do
+    sleep 1
+    systemctl is-active --quiet "$unit" || return 1
+  done
+  return 0
+}
+
 install_fetched_binary() {
   local restart_service="${1:-0}"
   local had_previous=0
@@ -442,18 +462,52 @@ validate_password() {
   [[ "$password" =~ ^[A-Za-z0-9_-]+$ ]]
 }
 
-validate_password_file() {
+validate_root_secret_file() {
   local file="$1"
+  local description="$2"
   local owner permissions
   [[ -f "$file" && ! -L "$file" && -r "$file" ]] ||
-    die "密码文件必须是可读的普通文件且不能是符号链接：$file"
+    die "${description}必须是可读的普通文件且不能是符号链接：$file"
   owner="$(stat -c '%u' -- "$file")"
   permissions="$(stat -c '%a' -- "$file")"
-  [[ "$owner" == "0" ]] || die "密码文件必须由 root 拥有：$file"
+  [[ "$owner" == "0" ]] || die "${description}必须由 root 拥有：$file"
   [[ "$permissions" =~ ^[0-7]{3,4}$ ]] ||
-    die "无法判断密码文件权限：$file"
+    die "无法判断${description}权限：$file"
   (( (8#$permissions & 0077) == 0 )) ||
-    die "密码文件不能向组或其他用户开放；请执行 chmod 600：$file"
+    die "${description}不能向组或其他用户开放；请执行 chmod 600：$file"
+}
+
+validate_password_file() {
+  validate_root_secret_file "$1" "密码文件"
+}
+
+validate_telegram_token() {
+  local token="$1"
+  (("${#token}" >= 20 && "${#token}" <= 200)) || return 1
+  [[ "$token" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]]
+}
+
+validate_telegram_chat_id() {
+  local chat_id="$1"
+  [[ "$chat_id" =~ ^[1-9][0-9]{4,19}$ ]]
+}
+
+find_free_stats_port() {
+  python3 - <<'PY'
+import socket
+
+for port in range(19090, 19200):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", port))
+    except OSError:
+        sock.close()
+        continue
+    sock.close()
+    print(port)
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
 }
 
 validate_masquerade_url() {
@@ -490,299 +544,7 @@ validate_public_masquerade_target() {
   while read -r address _; do
     [[ -n "$address" ]] && addresses+=("$address")
   done < <(getent ahosts "$host" | awk '!seen[$1]++ { print $1 }')
-  (("${#addresses[@]}" > 0)) ||
-    die "伪装站点当前无法解析：$host"
-  if ! python3 - "${addresses[@]}" <<'PY'
-import ipaddress
-import sys
-
-for value in sys.argv[1:]:
-    address = ipaddress.ip_address(value.split("%", 1)[0])
-    if not address.is_global:
-        raise SystemExit(1)
-PY
-  then
-    die "伪装站点解析到了私网、环回或保留地址，拒绝配置反代：$host"
-  fi
-}
-
-random_password() {
-  openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'
-}
-
-prompt_install_values() {
-  local non_interactive="$1"
-  local answer=""
-
-  if [[ -z "$DOMAIN" && "$non_interactive" -eq 0 ]]; then
-    read -r -p "证书/SNI 域名（需解析到本 VPS）: " DOMAIN
-  fi
-  DOMAIN="${DOMAIN,,}"
-
-  if [[ -z "$EMAIL" && "$non_interactive" -eq 0 ]]; then
-    read -r -p "ACME 通知邮箱: " EMAIL
-  fi
-
-  if [[ "$PORT_MODE_WAS_SET" -eq 0 && "$non_interactive" -eq 0 ]]; then
-    if [[ "$PORT_MODE" == "range" ]]; then
-      read -r -p "开启原生端口跳跃？[Y/n]: " answer
-    else
-      read -r -p "开启原生端口跳跃？[y/N]: " answer
-    fi
-    case "${answer,,}" in
-      y | yes) PORT_MODE="range" ;;
-      n | no) PORT_MODE="single" ;;
-      *) : ;;
-    esac
-  fi
-
-  if [[ "$PORT_VALUE_WAS_SET" -eq 0 && "$non_interactive" -eq 0 ]]; then
-    if [[ "$PORT_MODE" == "range" ]]; then
-      read -r -p "UDP 跳跃端口范围 [${HOP…255 tokens truncated…  esac
-  fi
-
-  [[ -n "$PASSWORD" ]] || PASSWORD="$(random_password)"
-}
-
-validate_install_values() {
-  [[ -n "$DOMAIN" ]] || die "缺少 --domain。"
-  validate_domain "$DOMAIN" || die "域名格式无效：$DOMAIN"
-  [[ -n "$EMAIL" ]] || die "缺少 --email。"
-  validate_email "$EMAIL" || die "邮箱格式无效：$EMAIL"
-  case "$PORT_MODE" in
-    single)
-      validate_port "$PORT" || die "端口必须在 1-65535 之间。"
-      ;;
-    range)
-      validate_port "$HOP_START" || die "跳跃起始端口必须在 1-65535 之间。"
-      validate_port "$HOP_END" || die "跳跃结束端口必须在 1-65535 之间。"
-      ((HOP_START < HOP_END)) || die "跳跃起始端口必须小于结束端口。"
-      validate_hop_interval "$HOP_MIN_INTERVAL" ||
-        die "最短跳跃间隔必须为 5-3600 秒。"
-      validate_hop_interval "$HOP_MAX_INTERVAL" ||
-        die "最长跳跃间隔必须为 5-3600 秒。"
-      ((HOP_MIN_INTERVAL <= HOP_MAX_INTERVAL)) ||
-        die "最短跳跃间隔不能大于最长跳跃间隔。"
-      ;;
-    *) die "未知端口模式：$PORT_MODE" ;;
-  esac
-  validate_password "$PASSWORD" ||
-    die "密码必须是 16-128 位，且只能包含字母、数字、下划线和连字符。"
-
-  if [[ "$MASQUERADE_MODE" == "proxy" ]]; then
-    validate_masquerade_url "$MASQUERADE_URL" ||
-      die "伪装站点必须是无空格、无引号的有效 https:// URL。"
-    [[ "$(masquerade_host "$MASQUERADE_URL")" != "$DOMAIN" ]] ||
-      die "伪装站点不能与 Hysteria 域名相同，否则可能形成反向代理循环。"
-    validate_public_masquerade_target "$(masquerade_host "$MASQUERADE_URL")"
-    warn "反代伪装允许未认证访客触发上游 HTTPS 请求，可能消耗 VPS 流量；不需要真实站点时优先使用默认静态响应。"
-  fi
-}
-
-load_existing_settings() {
-  [[ -f "$SETTINGS_PATH" ]] || return 1
-  # This file is generated by this script and is writable only by root.
-  # shellcheck disable=SC1090
-  source "$SETTINGS_PATH"
-  PORT_MODE="${PORT_MODE:-single}"
-  HOP_START="${HOP_START:-20000}"
-  HOP_END="${HOP_END:-50000}"
-  HOP_MIN_INTERVAL="${HOP_MIN_INTERVAL:-15}"
-  HOP_MAX_INTERVAL="${HOP_MAX_INTERVAL:-45}"
-}
-
-save_settings() {
-  local tmp
-  tmp="$(mktemp "${CONFIG_DIR}/.hy2-safe.env.XXXXXX")"
-  {
-    printf 'DOMAIN=%q\n' "$DOMAIN"
-    printf 'EMAIL=%q\n' "$EMAIL"
-    printf 'PORT=%q\n' "$PORT"
-    printf 'PORT_MODE=%q\n' "$PORT_MODE"
-    printf 'HOP_START=%q\n' "$HOP_START"
-    printf 'HOP_END=%q\n' "$HOP_END"
-    printf 'HOP_MIN_INTERVAL=%q\n' "$HOP_MIN_INTERVAL"
-    printf 'HOP_MAX_INTERVAL=%q\n' "$HOP_MAX_INTERVAL"
-    printf 'PASSWORD=%q\n' "$PASSWORD"
-    printf 'MASQUERADE_MODE=%q\n' "$MASQUERADE_MODE"
-    printf 'MASQUERADE_URL=%q\n' "$MASQUERADE_URL"
-    printf 'AUTO_UPDATE=%q\n' "$AUTO_UPDATE"
-  } >"$tmp"
-  chown root:root "$tmp"
-  chmod 0600 "$tmp"
-  mv -f -- "$tmp" "$SETTINGS_PATH"
-}
-
-ensure_service_user_and_directories() {
-  local nologin_shell
-  if ! getent group hysteria >/dev/null 2>&1; then
-    groupadd --system hysteria
-  fi
-  if ! getent passwd hysteria >/dev/null 2>&1; then
-    nologin_shell="$(command -v nologin || true)"
-    [[ -n "$nologin_shell" ]] || nologin_shell="/bin/false"
-    useradd \
-      --system \
-      --gid hysteria \
-      --home-dir "$STATE_DIR" \
-      --shell "$nologin_shell" \
-      hysteria
-  fi
-
-  install -d -m 0750 -o root -g hysteria "$CONFIG_DIR"
-  install -d -m 0750 -o hysteria -g hysteria "$STATE_DIR"
-  install -d -m 0750 -o hysteria -g hysteria "${STATE_DIR}/acme"
-  install -d -m 0755 -o root -g root /usr/local/bin /usr/local/sbin
-}
-
-write_config() {
-  local tmp
-  tmp="$(mktemp "${CONFIG_DIR}/.config.yaml.XXXXXX")"
-  {
-    if [[ "$PORT_MODE" == "range" ]]; then
-      printf 'listen: ":%s-%s"\n\n' "$HOP_START" "$HOP_END"
-    else
-      printf 'listen: ":%s"\n\n' "$PORT"
-    fi
-    printf 'acme:\n'
-    printf '  domains:\n'
-    printf '    - "%s"\n' "$DOMAIN"
-    printf '  email: "%s"\n' "$EMAIL"
-    printf '  dir: "%s/acme"\n\n' "$STATE_DIR"
-    printf 'auth:\n'
-    printf '  type: password\n'
-    printf '  password: "%s"\n\n' "$PASSWORD"
-    printf 'masquerade:\n'
-    if [[ "$MASQUERADE_MODE" == "proxy" ]]; then
-      printf '  type: proxy\n'
-      printf '  proxy:\n'
-      printf '    url: "%s"\n' "$MASQUERADE_URL"
-      printf '    rewriteHost: true\n'
-      printf '    insecure: false\n'
-      printf '    xForwarded: false\n'
-    else
-      printf '  type: string\n'
-      printf '  string:\n'
-      printf '    content: |\n'
-      printf '      <!doctype html>\n'
-      printf '      <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Welcome</title></head><body><main><h1>Welcome</h1><p>This service is online.</p></main></body></html>\n'
-      printf '    headers:\n'
-      printf '      content-type: "text/html; charset=utf-8"\n'
-      printf '      cache-control: "no-store"\n'
-      printf '      x-content-type-options: "nosniff"\n'
-      printf '    statusCode: 200\n'
-    fi
-  } >"$tmp"
-  chown root:hysteria "$tmp"
-  chmod 0640 "$tmp"
-  mv -f -- "$tmp" "$CONFIG_PATH"
-}
-
-install_manager_copy() {
-  local source_path
-  source_path="$(readlink -f "$0")"
-  if [[ "$source_path" != "$MANAGER_PATH" ]]; then
-    install -m 0755 -o root -g root "$source_path" "$MANAGER_PATH"
-  fi
-}
-
-write_systemd_units() {
-  local service_capabilities="CAP_NET_BIND_SERVICE"
-  local service_address_families="AF_INET AF_INET6 AF_UNIX"
-  if [[ "$PORT_MODE" == "range" ]]; then
-    service_capabilities+=" CAP_NET_ADMIN"
-    service_address_families+=" AF_NETLINK"
-  fi
-  cat >"$SERVICE_PATH" <<EOF
-[Unit]
-Description=Hysteria 2 Server
-Documentation=https://v2.hysteria.network/
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-Type=simple
-User=hysteria
-Group=hysteria
-WorkingDirectory=${STATE_DIR}
-ExecStart=${BIN_PATH} server --config ${CONFIG_PATH}
-Restart=on-failure
-RestartSec=5s
-UMask=0077
-
-Environment=HYSTERIA_DISABLE_UPDATE_CHECK=1
-Environment=HYSTERIA_LOG_LEVEL=info
-AmbientCapabilities=${service_capabilities}
-CapabilityBoundingSet=${service_capabilities}
-NoNewPrivileges=true
-PrivateDevices=true
-PrivateTmp=true
-ProtectClock=true
-ProtectControlGroups=true
-ProtectHome=true
-ProtectHostname=true
-ProtectKernelLogs=true
-ProtectKernelModules=true
-ProtectKernelTunables=true
-ProtectSystem=strict
-ReadOnlyPaths=${CONFIG_DIR}
-ReadWritePaths=${STATE_DIR}
-LockPersonality=true
-RestrictAddressFamilies=${service_address_families}
-RestrictRealtime=true
-RestrictSUIDSGID=true
-SystemCallArchitectures=native
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  cat >"$UPDATE_SERVICE_PATH" <<EOF
-[Unit]
-Description=Safely update the Hysteria 2 binary
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=${MANAGER_PATH} update --quiet
-NoNewPrivileges=true
-PrivateDevices=true
-PrivateTmp=true
-ProtectControlGroups=true
-ProtectHome=true
-ProtectKernelModules=true
-ProtectKernelTunables=true
-ProtectSystem=strict
-ReadWritePaths=/usr/local/bin /run/lock
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-RestrictRealtime=true
-RestrictSUIDSGID=true
-LockPersonality=true
-EOF
-
-  cat >"$UPDATE_TIMER_PATH" <<'EOF'
-[Unit]
-Description=Weekly Hysteria 2 stable update
-
-[Timer]
-OnCalendar=weekly
-RandomizedDelaySec=12h
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-
-  chmod 0644 "$SERVICE_PATH" "$UPDATE_SERVICE_PATH" "$UPDATE_TIMER_PATH"
-  systemctl daemon-reload
-}
-
-configure_update_timer() {
-  if [[ "$AUTO_UPDATE" -eq 1 ]]; then
-    systemctl enable --now "$TIMER_NAME"
-  else
-    systemctl disable --now "$TIMER_NAME" >/dev/null 2>&1 || true
+  (("${#addresses[@]}"…9737 tokens truncated…TIFIER_NAME" >/dev/null 2>&1 || true
   fi
 }
 
@@ -972,6 +734,10 @@ command_install() {
     MASQUERADE_MODE="static"
     MASQUERADE_URL=""
     AUTO_UPDATE=1
+    TELEGRAM_ENABLED=0
+    TELEGRAM_CHAT_ID=""
+    TELEGRAM_STATS_PORT=""
+    TELEGRAM_STATS_SECRET=""
   fi
   parse_config_options "$@"
   prompt_install_values "$NON_INTERACTIVE"
@@ -997,6 +763,10 @@ command_install() {
   if ! systemctl restart "$SERVICE_NAME" || ! wait_for_service; then
     journalctl --no-pager -n 40 -u "$SERVICE_NAME" >&2 || true
     die "Hysteria 服务启动失败。最常见原因是域名未正确解析、TCP 80/443 未放行或端口冲突。"
+  fi
+  if [[ "$TELEGRAM_ENABLED" -eq 1 ]]; then
+    configure_notifier_service ||
+      warn "Hysteria 正常运行，但 Telegram 提醒服务启动失败；请运行 hy2-safe telegram-logs。"
   fi
 
   info "安装完成，服务已作为非特权用户 hysteria 运行。"
@@ -1047,8 +817,193 @@ command_configure() {
     journalctl --no-pager -n 40 -u "$SERVICE_NAME" >&2 || true
     die "新配置启动失败，已恢复上一份配置。"
   fi
+  configure_notifier_service ||
+    warn "Hysteria 配置成功，但 Telegram 提醒服务未能启动；请运行 hy2-safe telegram-logs。"
   info "配置已更新。"
   show_client
+}
+
+restore_telegram_change() {
+  local backup_dir="$1"
+  local old_enabled="$2"
+  cp --preserve=mode,ownership,timestamps -- "${backup_dir}/config.yaml" "$CONFIG_PATH"
+  cp --preserve=mode,ownership,timestamps -- "${backup_dir}/hy2-safe.env" "$SETTINGS_PATH"
+  if [[ -f "${backup_dir}/telegram-notifier.json" ]]; then
+    cp --preserve=mode,ownership,timestamps -- \
+      "${backup_dir}/telegram-notifier.json" "$NOTIFIER_CONFIG_PATH"
+  else
+    rm -f -- "$NOTIFIER_CONFIG_PATH"
+  fi
+  systemctl daemon-reload
+  systemctl restart "$SERVICE_NAME" || true
+  wait_for_service || warn "恢复 Telegram 变更后 Hysteria 仍未启动，请检查日志。"
+  TELEGRAM_ENABLED="$old_enabled"
+  configure_notifier_service >/dev/null 2>&1 || true
+}
+
+command_telegram_setup() {
+  local token_input_file=""
+  local requested_chat_id=""
+  local token_file candidates_file old_enabled
+  require_root
+  require_systemd
+  install_dependencies
+  load_existing_settings || die "请先安装 Hy2，再运行 telegram-setup。"
+
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --token-file)
+        [[ "$#" -ge 2 ]] || die "--token-file 缺少参数。"
+        token_input_file="$2"
+        shift 2
+        ;;
+      --chat-id)
+        [[ "$#" -ge 2 ]] || die "--chat-id 缺少参数。"
+        requested_chat_id="$2"
+        shift 2
+        ;;
+      -h | --help)
+        printf '用法：hy2-safe telegram-setup [--token-file FILE --chat-id ID]\n'
+        return
+        ;;
+      *) die "telegram-setup 的未知选项：$1" ;;
+    esac
+  done
+
+  [[ -z "$requested_chat_id" ]] ||
+    validate_telegram_chat_id "$requested_chat_id" ||
+    die "Chat ID 必须是私人聊天的正整数。"
+  if [[ -n "$token_input_file" ]]; then
+    validate_root_secret_file "$token_input_file" "Bot Token 文件"
+  fi
+
+  exec 9>"$LOCK_PATH"
+  flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  TMP_ROOT="$(mktemp -d /tmp/hy2-safe.XXXXXXXX)"
+  token_file="${TMP_ROOT}/telegram-token"
+  candidates_file="${TMP_ROOT}/telegram-candidates.json"
+
+  if [[ -n "$token_input_file" ]]; then
+    head -n 1 -- "$token_input_file" | tr -d '\r\n' >"$token_file"
+  else
+    printf '请先通过 Telegram 的 @BotFather 创建机器人，并给机器人发送一条消息。\n'
+    read -r -s -p "请输入 Bot Token（输入时不会显示）: " TELEGRAM_BOT_TOKEN
+    printf '\n'
+    printf '%s' "$TELEGRAM_BOT_TOKEN" >"$token_file"
+    unset TELEGRAM_BOT_TOKEN
+  fi
+  chmod 0600 "$token_file"
+  validate_telegram_token "$(cat "$token_file")" ||
+    die "Bot Token 格式无效。"
+
+  if [[ -z "$requested_chat_id" ]]; then
+    read -r -p "确认已经给机器人发送消息后，按回车继续。"
+    discover_telegram_chats "$token_file" "$candidates_file"
+    read -r -p "请输入上面属于你自己的私人 Chat ID: " requested_chat_id
+    validate_telegram_chat_id "$requested_chat_id" ||
+      die "Chat ID 必须是私人聊天的正整数。"
+    validate_discovered_chat "$candidates_file" "$requested_chat_id" ||
+      die "该 Chat ID 不在刚才发现的私人聊天中，拒绝设置。"
+  fi
+
+  info "发送 Telegram 测试消息。"
+  telegram_send_test "$token_file" "$requested_chat_id"
+
+  old_enabled="$TELEGRAM_ENABLED"
+  cp --preserve=mode,ownership,timestamps -- "$CONFIG_PATH" "${TMP_ROOT}/config.yaml"
+  cp --preserve=mode,ownership,timestamps -- "$SETTINGS_PATH" "${TMP_ROOT}/hy2-safe.env"
+  if [[ -f "$NOTIFIER_CONFIG_PATH" ]]; then
+    cp --preserve=mode,ownership,timestamps -- \
+      "$NOTIFIER_CONFIG_PATH" "${TMP_ROOT}/telegram-notifier.json"
+  fi
+
+  TELEGRAM_ENABLED=1
+  TELEGRAM_CHAT_ID="$requested_chat_id"
+  if [[ -z "$TELEGRAM_STATS_PORT" ]]; then
+    TELEGRAM_STATS_PORT="$(find_free_stats_port)" ||
+      die "无法找到可用的本机统计端口。"
+  fi
+  [[ -n "$TELEGRAM_STATS_SECRET" ]] ||
+    TELEGRAM_STATS_SECRET="$(random_password)"
+  validate_install_values
+
+  if ! write_config ||
+    ! save_settings ||
+    ! write_telegram_config "$token_file" ||
+    ! write_systemd_units; then
+    warn "写入 Telegram 提醒配置失败，正在回滚。"
+    restore_telegram_change "$TMP_ROOT" "$old_enabled"
+    die "Telegram 提醒启用失败，已恢复原配置。"
+  fi
+  if ! systemctl restart "$SERVICE_NAME" || ! wait_for_service; then
+    warn "启用 Telegram 统计接口后 Hysteria 启动失败，正在回滚。"
+    restore_telegram_change "$TMP_ROOT" "$old_enabled"
+    journalctl --no-pager -n 40 -u "$SERVICE_NAME" >&2 || true
+    die "Telegram 提醒启用失败，已恢复原配置。"
+  fi
+  if ! configure_notifier_service; then
+    warn "Telegram 提醒服务启动失败，正在回滚。"
+    journalctl --no-pager -n 40 -u "$NOTIFIER_NAME" >&2 || true
+    restore_telegram_change "$TMP_ROOT" "$old_enabled"
+    die "Telegram 提醒启用失败，已恢复原配置。"
+  fi
+
+  info "Telegram 连接提醒已启用，只会向 Chat ID ${TELEGRAM_CHAT_ID} 主动发送消息。"
+  printf '规则：新 IP 网段立即提醒；相同网段一小时内合并；每天发送一份汇总。\n'
+}
+
+command_telegram_test() {
+  require_root
+  load_existing_settings || die "请先安装 Hy2。"
+  [[ "$TELEGRAM_ENABLED" -eq 1 && -f "$NOTIFIER_CONFIG_PATH" ]] ||
+    die "Telegram 提醒尚未启用。"
+  stored_telegram_send_test
+  info "Telegram 测试消息发送成功。"
+}
+
+command_telegram_logs() {
+  require_root
+  journalctl --no-pager -e -u "$NOTIFIER_NAME"
+}
+
+command_telegram_disable() {
+  local old_enabled
+  require_root
+  require_systemd
+  load_existing_settings || die "请先安装 Hy2。"
+  if [[ "$TELEGRAM_ENABLED" -eq 0 ]]; then
+    info "Telegram 提醒已经处于关闭状态。"
+    return
+  fi
+
+  exec 9>"$LOCK_PATH"
+  flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  TMP_ROOT="$(mktemp -d /tmp/hy2-safe.XXXXXXXX)"
+  old_enabled="$TELEGRAM_ENABLED"
+  cp --preserve=mode,ownership,timestamps -- "$CONFIG_PATH" "${TMP_ROOT}/config.yaml"
+  cp --preserve=mode,ownership,timestamps -- "$SETTINGS_PATH" "${TMP_ROOT}/hy2-safe.env"
+  if [[ -f "$NOTIFIER_CONFIG_PATH" ]]; then
+    cp --preserve=mode,ownership,timestamps -- \
+      "$NOTIFIER_CONFIG_PATH" "${TMP_ROOT}/telegram-notifier.json"
+  fi
+
+  TELEGRAM_ENABLED=0
+  TELEGRAM_CHAT_ID=""
+  TELEGRAM_STATS_PORT=""
+  TELEGRAM_STATS_SECRET=""
+  if ! write_config || ! save_settings; then
+    warn "写入关闭配置失败，正在回滚。"
+    restore_telegram_change "$TMP_ROOT" "$old_enabled"
+    die "Telegram 提醒关闭失败，已恢复原配置。"
+  fi
+  if ! systemctl restart "$SERVICE_NAME" || ! wait_for_service; then
+    warn "关闭 Telegram 统计接口后 Hysteria 启动失败，正在回滚。"
+    restore_telegram_change "$TMP_ROOT" "$old_enabled"
+    die "Telegram 提醒关闭失败，已恢复原配置。"
+  fi
+  configure_notifier_service
+  rm -f -- "$NOTIFIER_CONFIG_PATH"
+  info "Telegram 提醒已关闭，Bot Token 已从服务器配置中删除。"
 }
 
 command_update() {
@@ -1077,6 +1032,7 @@ command_update() {
 
 command_status() {
   require_root
+  load_existing_settings || true
   systemctl --no-pager --full status "$SERVICE_NAME" || true
   printf '\n已安装版本：%s\n' "$(installed_version || printf '未安装')"
   if systemctl is-enabled --quiet "$TIMER_NAME" 2>/dev/null; then
@@ -1084,6 +1040,15 @@ command_status() {
     systemctl list-timers --no-pager "$TIMER_NAME" || true
   else
     printf '自动更新：未开启\n'
+  fi
+  if [[ "${TELEGRAM_ENABLED:-0}" -eq 1 ]]; then
+    if systemctl is-active --quiet "$NOTIFIER_NAME" 2>/dev/null; then
+      printf 'Telegram 提醒：已开启并正在运行\n'
+    else
+      printf 'Telegram 提醒：已配置但服务异常\n'
+    fi
+  else
+    printf 'Telegram 提醒：未开启\n'
   fi
 }
 
@@ -1101,18 +1066,25 @@ command_uninstall() {
 
   systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
   systemctl disable --now "$TIMER_NAME" >/dev/null 2>&1 || true
+  systemctl disable --now "$NOTIFIER_NAME" >/dev/null 2>&1 || true
   rm -f -- \
     "$SERVICE_PATH" \
     "$UPDATE_SERVICE_PATH" \
     "$UPDATE_TIMER_PATH" \
+    "$NOTIFIER_SERVICE_PATH" \
     "$BIN_PATH" \
     "$PREVIOUS_BIN_PATH" \
+    "$NOTIFIER_PATH" \
     "$MANAGER_PATH"
   systemctl daemon-reload
-  systemctl reset-failed "$SERVICE_NAME" hy2-safe-update.service >/dev/null 2>&1 || true
+  systemctl reset-failed \
+    "$SERVICE_NAME" \
+    hy2-safe-update.service \
+    "$NOTIFIER_NAME" >/dev/null 2>&1 || true
 
   info "程序和 systemd 单元已卸载。"
-  printf '出于防误删考虑，配置和证书仍保留在：\n  %s\n  %s\n' "$CONFIG_DIR" "$STATE_DIR"
+  printf '出于防误删考虑，配置、证书和 Telegram 提醒状态仍保留在：\n  %s\n  %s\n  %s\n' \
+    "$CONFIG_DIR" "$STATE_DIR" "$NOTIFIER_STATE_DIR"
 }
 
 main() {
@@ -1127,6 +1099,10 @@ main() {
     show-client) show_client "$@" ;;
     status) command_status "$@" ;;
     logs) command_logs "$@" ;;
+    telegram-setup) command_telegram_setup "$@" ;;
+    telegram-test) command_telegram_test "$@" ;;
+    telegram-logs) command_telegram_logs "$@" ;;
+    telegram-disable) command_telegram_disable "$@" ;;
     uninstall) command_uninstall "$@" ;;
     help | -h | --help) usage ;;
     *) die "未知命令：$command。请运行 $PROGRAM help。" ;;
