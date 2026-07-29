@@ -5,6 +5,7 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = (ROOT / "hy2-safe.sh").read_text(encoding="utf-8")
+README = (ROOT / "README.md").read_text(encoding="utf-8")
 
 
 def require(pattern: str, message: str) -> None:
@@ -18,6 +19,7 @@ def forbid(pattern: str, message: str) -> None:
 
 
 require(r"^set -Eeuo pipefail$", "strict Bash mode is required")
+require(r'PROGRAM_VERSION="1\.0\.0"', "the release must expose its manager version")
 require(r"require_supported_os", "installations must be limited to Debian 12/13")
 require(r"sha256sum", "release binaries must be checksum-verified")
 require(r"release_asset_field", "release metadata must be parsed structurally")
@@ -25,9 +27,14 @@ require(r"asset_api_digest", "GitHub release asset digests must be checked")
 require(r"compare_versions", "automatic updates must refuse downgrades")
 require(r"--max-filesize 134217728", "downloads must have a hard size ceiling")
 require(r"stat -c '%s'", "download sizes must match release metadata")
+require(r"reported_version=", "the verified binary must report its version")
+require(r'"\$reported_version" == "\$version"', "the binary version must match release metadata")
 require(r'sub\(/\^\.\*\\//, "", candidate\)', "hashes.txt build/ paths must be normalized")
 require(r"REPOSITORY=\"apernet/hysteria\"", "downloads must use the official repository")
 require(r"User=hysteria$", "the service must run as the dedicated user")
+require(r"现有 hysteria 用户具有可登录 Shell", "pre-existing service users must be validated")
+require(r"hysteria 组包含额外成员", "the config-reading group must reject extra members")
+require(r'validate_root_secret_file "\$SETTINGS_PATH"', "managed settings must be ownership-checked")
 require(r'service_capabilities="CAP_NET_BIND_SERVICE"', "low-port capability is required")
 require(r'service_capabilities\+=" CAP_NET_ADMIN"', "port hopping must add NET_ADMIN only conditionally")
 require(r'service_address_families\+=" AF_NETLINK"', "port hopping must allow nftables netlink only conditionally")
@@ -55,7 +62,7 @@ require(r'f"v6:\{network\.network_address\}/48"', "IPv6 alerts must group by /48
 require(r"--token-file FILE --chat-id ID", "Telegram setup must support a secret token file")
 require(r"是否现在开启 Telegram 成功连接提醒", "interactive installs must offer Telegram setup")
 require(r"flock -u 9\s+command_telegram_setup", "the install lock must be released before Telegram setup")
-require(r"hy2-safe 一键管理菜单", "running without a command must offer a management menu")
+require(r"hy2-safe.*一键管理菜单", "running without a command must offer a management menu")
 require(r'\[\[ "\$#" -eq 0 \]\][\s\S]*?command_menu', "no-argument interactive runs must open the menu")
 require(r"完整卸载 Hy2", "the menu must expose a clearly labeled full uninstall")
 require(r"更换 Telegram 机器人", "the menu must expose Telegram bot replacement")
@@ -75,6 +82,8 @@ require(r'remove_managed_tree "\$STATE_DIR"', "full uninstall must remove ACME s
 require(r'remove_managed_tree "\$NOTIFIER_PRIVATE_STATE_DIR"', "DynamicUser private notifier state must be removed")
 require(r"拒绝删除不在 hy2-safe 白名单中的目录", "recursive deletion must use an exact allowlist")
 require(r"ProtectSystem=strict$", "the service unit must protect the filesystem")
+require(r"ProcSubset=pid", "services must receive a restricted /proc view")
+require(r"MemoryDenyWriteExecute=true", "services must deny writable executable memory")
 require(r"ReadWritePaths=/usr/local/bin /run/lock", "the updater must have a narrow writable filesystem")
 require(r"正在自动回滚", "updates must implement rollback")
 require(r"正在恢复上一份配置", "configuration changes must implement rollback")
@@ -87,6 +96,8 @@ forbid(r"chmod\s+(?:-R\s+)?777", "world-writable permissions are forbidden")
 forbid(r"iptables\s+-t\s+nat\s+-F", "the installer must not flush firewall chains")
 forbid(r"insecure:\s+true", "TLS verification must not be disabled")
 forbid(r"skip-cert-verify", "TLS verification must not be disabled")
+forbid(r"fastOpen:\s+true", "client output must preserve correct proxy failure semantics")
+forbid(r"(?m)^\s*bandwidth:", "generated client YAML must not force a fixed bandwidth")
 forbid(r"www\.bing\.com", "third-party self-signed identities are forbidden")
 forbid(r"curl[^\n]*\|\s*(?:ba)?sh", "download-and-execute pipelines are forbidden")
 forbid(r"MASQUERADE_DIR", "the fixed default masquerade must not expose a writable directory")
@@ -167,5 +178,21 @@ if "hourly:v4:123.45.67.0/24" not in state["outbox"]:
 process_connection(state, config, "123.45.67.91:6789", 100000.0)
 if "returned:v4:123.45.67.0/24" not in state["outbox"]:
     raise AssertionError("a /24 returning after 24 hours must alert again")
+
+if not README.startswith("# hy2-safe\n"):
+    raise AssertionError("README must start with one H1 project title")
+if README.count("```") % 2:
+    raise AssertionError("README fenced code blocks must be balanced")
+if "[!IMPORTANT]" not in README or "[!WARNING]" not in README:
+    raise AssertionError("README must make the main safety warnings prominent")
+if "hy2-safe v1.0.0 一键管理菜单" not in README:
+    raise AssertionError("README menu version must match the release")
+if "raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh" not in README:
+    raise AssertionError("README must contain the public one-line installer URL")
+if "sudo " in README:
+    raise AssertionError("README commands are written for the root-user workflow")
+for label, target in re.findall(r"\[([^\]\n]+)\]\(([^)\n]+)\)", README):
+    if not label.strip() or not target.strip():
+        raise AssertionError("README contains an empty Markdown link")
 
 print("static checks passed")
