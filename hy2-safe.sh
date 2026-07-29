@@ -15,6 +15,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly PROGRAM="hy2-safe"
+readonly PROGRAM_VERSION="1.0.0"
 readonly REPOSITORY="apernet/hysteria"
 readonly API_URL="https://api.github.com/repos/${REPOSITORY}/releases/latest"
 readonly RELEASE_URL="https://github.com/${REPOSITORY}/releases/download"
@@ -65,9 +66,8 @@ cleanup() {
 trap cleanup EXIT
 
 usage() {
+  printf 'hy2-safe v%s - 安全、精简的 Hysteria 2 服务端管理器\n\n' "$PROGRAM_VERSION"
   cat <<'EOF'
-hy2-safe - 安全、精简的 Hysteria 2 服务端管理器
-
 用法：
   ./hy2-safe.sh                 打开中文管理菜单
   ./hy2-safe.sh install [选项]
@@ -75,6 +75,7 @@ hy2-safe - 安全、精简的 Hysteria 2 服务端管理器
   hy2-safe update [--quiet]
   hy2-safe show-client
   hy2-safe status
+  hy2-safe version
   hy2-safe logs
   hy2-safe telegram-setup [--token-file FILE --chat-id ID]
   hy2-safe telegram-test
@@ -155,20 +156,24 @@ require_supported_os() {
 install_dependencies() {
   local missing=()
   local command_name
-  for command_name in curl openssl sha256sum install flock getent python3 stat; do
+  for command_name in \
+    awk curl flock getent groupadd head id install openssl python3 readlink sed sha256sum \
+    stat timeout tr uname useradd; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
       missing+=("$command_name")
     fi
   done
   [[ "${#missing[@]}" -eq 0 ]] && return
 
-  info "安装必要依赖：curl、CA 证书、OpenSSL、coreutils、util-linux、Python 3。"
+  info "安装必要依赖：curl、CA 证书、OpenSSL、coreutils、util-linux、Python 3、awk、sed 和账号管理工具。"
   command -v apt-get >/dev/null 2>&1 || die "Debian 系统中未找到 apt-get。"
   apt-get -o DPkg::Lock::Timeout=60 update
   DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y \
-    --no-install-recommends ca-certificates curl openssl coreutils util-linux python3
+    --no-install-recommends ca-certificates coreutils curl mawk openssl passwd python3 sed util-linux
 
-  for command_name in curl openssl sha256sum install flock getent python3 stat; do
+  for command_name in \
+    awk curl flock getent groupadd head id install openssl python3 readlink sed sha256sum \
+    stat timeout tr uname useradd; do
     command -v "$command_name" >/dev/null 2>&1 || die "依赖安装后仍未找到：$command_name"
   done
 }
@@ -279,7 +284,7 @@ PY
 fetch_verified_release() {
   local architecture asset version metadata
   local asset_url hashes_url asset_api_digest hashes_api_digest
-  local asset_size hashes_size expected actual hashes_actual
+  local asset_size hashes_size expected actual hashes_actual reported_version
   architecture="$(detect_architecture)"
   asset="hysteria-linux-${architecture}"
   TMP_ROOT="$(mktemp -d /tmp/hy2-safe.XXXXXXXX)"
@@ -346,6 +351,13 @@ fetch_verified_release() {
     die "SHA-256 校验失败，拒绝安装。期望 ${expected}，实际 ${actual}。"
 
   chmod 0755 "${TMP_ROOT}/${asset}"
+  reported_version="$(
+    timeout 10s "${TMP_ROOT}/${asset}" version 2>/dev/null |
+      sed -n 's/.*Version:[[:space:]]*\(v[^[:space:]]*\).*/\1/p' |
+      head -n 1
+  )" || die "官方二进制无法运行或无法报告版本，拒绝安装。"
+  [[ "$reported_version" == "$version" ]] ||
+    die "二进制报告版本 ${reported_version:-未知}，与 Release 版本 ${version} 不一致。"
 
   FETCHED_VERSION="$version"
   FETCHED_BINARY="${TMP_ROOT}/${asset}"
@@ -509,7 +521,7 @@ validate_telegram_token() {
 
 validate_telegram_chat_id() {
   local chat_id="$1"
-  [[ "$chat_id" =~ ^[1-9][0-9]{4,19}$ ]]
+  [[ "$chat_id" =~ ^[1-9][0-9]{0,18}$ ]]
 }
 
 find_free_stats_port() {
@@ -538,7 +550,96 @@ validate_masquerade_url() {
   case "$url" in
     *" "* | *$'\t'* | *$'\r'* | *$'\n'* | *"'"* | *'"'* | *\\*) return 1 ;;
   esac
-  [[ "$url" =~ ^https://[A…11256 tokens truncated…到可供重装的 hy2-safe 配置。"
+  [[ "$url" =~ ^https://[A-Za-z0-9] ]] || return 1
+  authority="${url#https://}"
+  authority="${authority%%/*}"
+  [[ "$authority" != *"@"* ]] || return 1
+  host="${authority%%:*}"
+  validate_domain "${host,,}" || return 1
+  if [[ "$authority" == *:* ]]; then
+    port="${authority##*:}"
+    validate_port "$port" || return 1
+  fi
+}
+
+masquerade_host() {
+  local value="${1#https://}"
+  value="${value%%/*}"
+  value="${value%%:*}"
+  printf '%s\n' "${value,,}"
+}
+
+validate_public_masquerade_target() {
+  local host="$1"
+  local address
+  local addresses=()
+  while read -r address _; do
+    [[ -n "$address" ]] && addresses+=("$address")
+  done < <(getent ahosts "$host" | awk '!seen[$1]++ { print $1 }')
+  (("${#addresses[@]}" > 0)) ||
+    die "伪装站点当前无法解析：$host"
+  if ! python3 - "${addresses[@]}" <<'PY'
+import ipaddress
+import sys
+
+for value in sys.argv[1:]:
+    address = ipaddress.ip_address(value.split("%", 1)[0])
+    if not address.is_global:
+        raise SystemExit(1)
+PY
+  then
+    die "伪装站点解析到了私网、环回或保留地址，拒绝配置反代：$host"
+  fi
+}
+
+random_password() {
+  openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'
+}
+
+prompt_install_values() {
+  local non_interactive="$1"
+  local answer=""
+
+  if [[ -z "$DOMAIN" && "$n…10154 tokens truncated… firewall_ports="$PORT"
+    transport_config=""
+  fi
+  cat <<EOF
+Hysteria 2 官方客户端完整 YAML（本机 SOCKS5：127.0.0.1:1080）：
+
+server: "${server_address}"
+auth: ${PASSWORD}
+tls:
+  sni: ${DOMAIN}
+congestion:
+  type: bbr
+  bbrProfile: conservative
+${transport_config}
+socks5:
+  listen: 127.0.0.1:1080
+
+${share_output}
+
+需要放行的 UDP 端口：${firewall_ports}
+EOF
+}
+
+command_install() {
+  local install_arg
+  local telegram_answer=""
+  require_root
+  require_systemd
+  require_supported_os
+  REINSTALL=0
+  for install_arg in "$@"; do
+    [[ "$install_arg" == "--reinstall" ]] && REINSTALL=1
+  done
+  if [[ -f "$SETTINGS_PATH" ]]; then
+    [[ "$REINSTALL" -eq 1 ]] ||
+      die "检测到已有或已卸载但保留配置的 hy2-safe 实例。请使用 configure、update 或 install --reinstall。"
+  elif [[ -e "$BIN_PATH" || -e "$CONFIG_PATH" || -e "$SERVICE_PATH" ]]; then
+    die "检测到非 hy2-safe 管理的 Hysteria 文件，拒绝覆盖。请先备份并迁移或卸载旧实例。"
+  elif [[ "$REINSTALL" -eq 1 ]]; then
+    die "没有找到可供重装的 hy2-safe 配置。"
   fi
   install_dependencies
 
@@ -632,6 +733,7 @@ command_configure() {
   exec 9>"$LOCK_PATH"
   flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
 
+  ensure_service_user_and_directories
   TMP_ROOT="$(mktemp -d /tmp/hy2-safe.XXXXXXXX)"
   cp --preserve=mode,ownership,timestamps -- "$CONFIG_PATH" "${TMP_ROOT}/config.yaml"
   cp --preserve=mode,ownership,timestamps -- "$SETTINGS_PATH" "${TMP_ROOT}/hy2-safe.env"
@@ -687,6 +789,7 @@ command_telegram_setup() {
   require_systemd
   install_dependencies
   load_existing_settings || die "请先安装 Hy2，再运行 telegram-setup。"
+  install_manager_copy
 
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -717,6 +820,7 @@ command_telegram_setup() {
 
   exec 9>"$LOCK_PATH"
   flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  ensure_service_user_and_directories
   TMP_ROOT="$(mktemp -d /tmp/hy2-safe.XXXXXXXX)"
   token_file="${TMP_ROOT}/telegram-token"
   candidates_file="${TMP_ROOT}/telegram-candidates.json"
@@ -826,6 +930,7 @@ command_telegram_disable() {
   require_root
   require_systemd
   load_existing_settings || die "请先安装 Hy2。"
+  install_manager_copy
   if [[ "$TELEGRAM_ENABLED" -eq 0 ]]; then
     systemctl disable --now "$NOTIFIER_NAME" >/dev/null 2>&1 || true
     rm -f -- "$NOTIFIER_CONFIG_PATH"
@@ -871,6 +976,8 @@ command_update() {
   require_root
   require_systemd
   [[ -f "$SETTINGS_PATH" ]] || die "未检测到 hy2-safe 管理的安装，拒绝更新未知实例。"
+  validate_root_secret_file "$SETTINGS_PATH" "hy2-safe 设置文件"
+  install_manager_copy
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
       --quiet)
@@ -891,11 +998,17 @@ command_update() {
   install_fetched_binary 1
 }
 
+command_version() {
+  printf 'hy2-safe 管理脚本版本：v%s\n' "$PROGRAM_VERSION"
+  printf 'Hysteria 2 核心版本：%s\n' "$(installed_version || printf '未安装')"
+}
+
 command_status() {
   local current_version
   require_root
   load_existing_settings || true
   current_version="$(installed_version || printf '未安装')"
+  printf 'hy2-safe 管理脚本版本：v%s\n' "$PROGRAM_VERSION"
   printf '当前 Hysteria 2 版本：%s\n' "$current_version"
   if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
     printf 'Hy2 服务：正在运行\n'
@@ -931,6 +1044,7 @@ command_uninstall() {
   require_root
   require_systemd
   [[ -f "$SETTINGS_PATH" ]] || die "未检测到 hy2-safe 管理的安装，拒绝删除未知实例。"
+  validate_root_secret_file "$SETTINGS_PATH" "hy2-safe 设置文件"
 
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -995,8 +1109,9 @@ command_uninstall() {
 command_menu() {
   local choice=""
   require_root
-  printf '\nhy2-safe 一键管理菜单\n'
+  printf '\nhy2-safe v%s 一键管理菜单\n' "$PROGRAM_VERSION"
   if [[ -f "$SETTINGS_PATH" ]]; then
+    validate_root_secret_file "$SETTINGS_PATH" "hy2-safe 设置文件"
     printf '当前状态：已检测到 hy2-safe 安装\n'
     install_manager_copy
   else
@@ -1054,6 +1169,7 @@ main() {
     update) command_update "$@" ;;
     show-client) show_client "$@" ;;
     status) command_status "$@" ;;
+    version | -V | --version) command_version ;;
     logs) command_logs "$@" ;;
     telegram-setup) command_telegram_setup "$@" ;;
     telegram-test) command_telegram_test "$@" ;;
