@@ -2164,7 +2164,7 @@ command_telegram_replace() {
   require_root
   load_existing_settings || die "请先安装 Hy2。"
   [[ "$TELEGRAM_ENABLED" -eq 1 && -f "$NOTIFIER_CONFIG_PATH" ]] ||
-    die "Telegram 提醒尚未启用，请选择“添加 Telegram 通知”。"
+    die "Telegram 提醒尚未启用，请选择 '添加 Telegram 通知'。"
   info "新机器人通过 Token、Chat ID 和测试消息验证后才会替换旧机器人；失败时保留旧配置。"
   command_telegram_setup "$@"
 }
@@ -2173,8 +2173,8 @@ command_telegram_add() {
   require_root
   load_existing_settings || die "请先安装 Hy2。"
   [[ "$TELEGRAM_ENABLED" -eq 0 ]] ||
-    die "Telegram 提醒已经启用；如需更换 Token，请选择“更换 Telegram 机器人”。"
-  command_telegram_setup "$@"
+    die "Telegram 提醒已经启用；如需更换 Token，请选择 '更换 Telegram 机器人'。"
+  command_telegram_setup
 }
 
 command_telegram_test() {
