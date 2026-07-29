@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate installer
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Check Bash syntax
+        run: bash -n hy2-safe.sh
+
+      - name: Run ShellCheck
+        run: shellcheck --severity=warning hy2-safe.sh
+
+      - name: Run project static checks
+        run: python3 tests/static_checks.py
