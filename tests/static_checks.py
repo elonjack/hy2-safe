@@ -32,6 +32,11 @@ require(r'service_capabilities="CAP_NET_BIND_SERVICE"', "low-port capability is 
 require(r'service_capabilities\+=" CAP_NET_ADMIN"', "port hopping must add NET_ADMIN only conditionally")
 require(r'service_address_families\+=" AF_NETLINK"', "port hopping must allow nftables netlink only conditionally")
 require(r'listen: ":%s-%s"', "native server-side port ranges must be supported")
+require(r"ignoreClientBandwidth: true", "the server must reject client bandwidth hints")
+require(r"bbrProfile: conservative", "server and official client output must use conservative BBR")
+if len(re.findall(r"bbrProfile: conservative", SCRIPT)) < 2:
+    raise AssertionError("both server and official client output must use conservative BBR")
+forbid(r"printf 'bandwidth:", "generated configs must not force a fixed bandwidth")
 require(r"minHopInterval:", "client output must include randomized port hopping")
 require(r"^socks5:$", "official client YAML must include a runnable client mode")
 require(r"listen: 127\.0\.0\.1:1080", "official client YAML must bind its SOCKS5 proxy locally")
