@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import re
 
 
@@ -37,6 +38,16 @@ require(r"listen: 127\.0\.0\.1:1080", "official client YAML must bind its SOCKS5
 require(r"&insecure=0", "share links must keep certificate verification enabled explicitly")
 require(r"&mport=\$\{HOP_START\}-\$\{HOP_END\}", "v2rayN/v2rayNG links must encode port hopping with mport")
 require(r"compatible_share=.*\$\{DOMAIN\}:\$\{HOP_START\}/", "compatible links must keep a numeric URI port")
+require(r'listen: "127\.0\.0\.1:%s"', "traffic stats must bind to loopback only")
+require(r"LoadCredential=telegram-config:", "the notifier token must use systemd credentials")
+require(r"DynamicUser=yes", "the notifier must use an isolated dynamic user")
+require(r"SupplementaryGroups=systemd-journal", "the notifier needs read-only journal access")
+require(r"PartOf=hysteria-server\.service", "the notifier must restart with Hysteria")
+require(r"protect_content.*true", "Telegram messages must request content protection")
+require(r"HOURLY_SECONDS = 3600", "reconnect alerts must be rate-limited")
+require(r'f"v4:\{network\.network_address\}/24"', "IPv4 alerts must group by /24")
+require(r'f"v6:\{network\.network_address\}/48"', "IPv6 alerts must group by /48")
+require(r"--token-file FILE --chat-id ID", "Telegram setup must support a secret token file")
 require(r"ProtectSystem=strict$", "the service unit must protect the filesystem")
 require(r"ReadWritePaths=/usr/local/bin /run/lock", "the updater must have a narrow writable filesystem")
 require(r"正在自动回滚", "updates must implement rollback")
@@ -53,5 +64,82 @@ forbid(r"skip-cert-verify", "TLS verification must not be disabled")
 forbid(r"www\.bing\.com", "third-party self-signed identities are forbidden")
 forbid(r"curl[^\n]*\|\s*(?:ba)?sh", "download-and-execute pipelines are forbidden")
 forbid(r"MASQUERADE_DIR", "the fixed default masquerade must not expose a writable directory")
+forbid(r"--telegram-token(?:\s|=)", "Bot tokens must never be accepted on the command line")
+
+python_blocks = re.findall(r"<<'PY'\n(.*?)\nPY(?:\n|$)", SCRIPT, re.DOTALL)
+if len(python_blocks) < 10:
+    raise AssertionError("all embedded Python helpers must use quoted heredocs")
+for index, source in enumerate(python_blocks, start=1):
+    compile(source, f"embedded-python-{index}.py", "exec")
+
+
+match = re.search(
+    r"write_notifier_script\(\) \{.*?cat >\"\$tmp\" <<'PY'\n(.*?)\nPY\n  chmod 0755",
+    SCRIPT,
+    re.DOTALL,
+)
+if match is None:
+    raise AssertionError("embedded notifier source must be extractable")
+
+previous_credentials = os.environ.get("CREDENTIALS_DIRECTORY")
+previous_state = os.environ.get("STATE_DIRECTORY")
+os.environ["CREDENTIALS_DIRECTORY"] = str(ROOT / "tests")
+os.environ["STATE_DIRECTORY"] = str(ROOT / "tests")
+namespace = {"__name__": "hy2_notifier_test"}
+try:
+    exec(compile(match.group(1), "hy2-safe-notifier.py", "exec"), namespace)
+finally:
+    if previous_credentials is None:
+        os.environ.pop("CREDENTIALS_DIRECTORY", None)
+    else:
+        os.environ["CREDENTIALS_DIRECTORY"] = previous_credentials
+    if previous_state is None:
+        os.environ.pop("STATE_DIRECTORY", None)
+    else:
+        os.environ["STATE_DIRECTORY"] = previous_state
+
+parse_remote_ip = namespace["parse_remote_ip"]
+hidden_ip_group = namespace["hidden_ip_group"]
+extract_connection = namespace["extract_connection"]
+process_connection = namespace["process_connection"]
+queue_hourly_summaries = namespace["queue_hourly_summaries"]
+default_state = namespace["default_state"]
+namespace["online_line"] = lambda _config: "当前在线客户端：1"
+
+v4_key, v4_label = hidden_ip_group(parse_remote_ip("123.45.67.89:443"))
+if (v4_key, v4_label) != ("v4:123.45.67.0/24", "123.45.67.*"):
+    raise AssertionError("IPv4 hiding/grouping is incorrect")
+
+v6_key, v6_label = hidden_ip_group(parse_remote_ip("[2408:8215:1234::99]:443"))
+if (v6_key, v6_label) != ("v6:2408:8215:1234::/48", "2408:8215:1234:*"):
+    raise AssertionError("IPv6 hiding/grouping is incorrect")
+
+event = extract_connection(
+    {
+        "MESSAGE": (
+            '2026-07-29T12:00:00+08:00 INFO client connected '
+            '{"addr":"123.45.67.89:4567","id":"user","tx":0}'
+        ),
+        "__REALTIME_TIMESTAMP": "1785297600000000",
+    }
+)
+if event is None or event[0] != "123.45.67.89:4567":
+    raise AssertionError("successful Hysteria connection logs must be recognized")
+
+state = default_state()
+config = {}
+process_connection(state, config, "123.45.67.89:4567", 1000.0)
+process_connection(state, config, "123.45.67.90:5678", 1010.0)
+group = state["groups"]["v4:123.45.67.0/24"]
+if group["pending_reconnects"] != 1 or len(state["groups"]) != 1:
+    raise AssertionError("same-/24 reconnects must be grouped")
+queue_hourly_summaries(state, config, 4611.0)
+if group["pending_reconnects"] != 0:
+    raise AssertionError("hourly summaries must consume grouped reconnect counts")
+if "hourly:v4:123.45.67.0/24" not in state["outbox"]:
+    raise AssertionError("an hourly reconnect summary must be queued")
+process_connection(state, config, "123.45.67.91:6789", 100000.0)
+if "returned:v4:123.45.67.0/24" not in state["outbox"]:
+    raise AssertionError("a /24 returning after 24 hours must alert again")
 
 print("static checks passed")
