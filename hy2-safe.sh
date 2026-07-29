@@ -544,9 +544,7 @@ validate_public_masquerade_target() {
   while read -r address _; do
     [[ -n "$address" ]] && addresses+=("$address")
   done < <(getent ahosts "$host" | awk '!seen[$1]++ { print $1 }')
-  (("${#addresses[@]}"…9890 tokens truncated… PORT_MODE="single"
-        PORT="$2"
-        PORT_MODE_WAS_SET=1
+  (("${#addresses[@]}"…9951 tokens truncated…RT_MODE_WAS_SET=1
         PORT_VALUE_WAS_SET=1
         shift 2
         ;;
@@ -664,6 +662,9 @@ server: "${server_address}"
 auth: ${PASSWORD}
 tls:
   sni: ${DOMAIN}
+congestion:
+  type: bbr
+  bbrProfile: conservative
 fastOpen: true
 ${transport_config}
 socks5:
