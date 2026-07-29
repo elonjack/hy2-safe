@@ -544,32 +544,7 @@ validate_public_masquerade_target() {
   while read -r address _; do
     [[ -n "$address" ]] && addresses+=("$address")
   done < <(getent ahosts "$host" | awk '!seen[$1]++ { print $1 }')
-  (("${#addresses[@]}"…9737 tokens truncated…TIFIER_NAME" >/dev/null 2>&1 || true
-  fi
-}
-
-parse_config_options() {
-  NON_INTERACTIVE=0
-  PORT_MODE_WAS_SET=0
-  PORT_VALUE_WAS_SET=0
-  MASQUERADE_WAS_SET=0
-  AUTO_UPDATE_WAS_SET=0
-
-  while [[ "$#" -gt 0 ]]; do
-    case "$1" in
-      --domain)
-        [[ "$#" -ge 2 ]] || die "--domain 缺少参数。"
-        DOMAIN="$2"
-        shift 2
-        ;;
-      --email)
-        [[ "$#" -ge 2 ]] || die "--email 缺少参数。"
-        EMAIL="$2"
-        shift 2
-        ;;
-      --port)
-        [[ "$#" -ge 2 ]] || die "--port 缺少参数。"
-        PORT_MODE="single"
+  (("${#addresses[@]}"…9890 tokens truncated… PORT_MODE="single"
         PORT="$2"
         PORT_MODE_WAS_SET=1
         PORT_VALUE_WAS_SET=1
@@ -702,6 +677,7 @@ EOF
 
 command_install() {
   local install_arg
+  local telegram_answer=""
   require_root
   require_systemd
   require_supported_os
@@ -777,6 +753,21 @@ command_install() {
       "$HOP_START" "$HOP_END"
   else
     printf '\n请确认防火墙/安全组已放行：UDP %s，以及 ACME 所需的 TCP 80/443。\n' "$PORT"
+  fi
+  if [[ "$NON_INTERACTIVE" -eq 0 && "$TELEGRAM_ENABLED" -eq 0 ]]; then
+    printf '\nTelegram 提醒是可选功能；设置失败不会影响已经运行的 Hy2。\n'
+    read -r -p "是否现在开启 Telegram 成功连接提醒？[y/N]: " telegram_answer
+    case "${telegram_answer,,}" in
+      y | yes)
+        cleanup
+        TMP_ROOT=""
+        flock -u 9
+        command_telegram_setup
+        ;;
+      *)
+        printf '已跳过。以后需要时可运行：hy2-safe telegram-setup\n'
+        ;;
+    esac
   fi
 }
 
