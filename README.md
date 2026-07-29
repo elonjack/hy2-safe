@@ -1,97 +1,124 @@
 # hy2-safe
 
-一个面向 Debian 12/13 的 Hysteria 2（Hy2）服务端安装与管理脚本。
+[![Release](https://img.shields.io/github/v/release/elonjack/hy2-safe?display_name=tag)](https://github.com/elonjack/hy2-safe/releases)
+[![CI](https://github.com/elonjack/hy2-safe/actions/workflows/ci.yml/badge.svg)](https://github.com/elonjack/hy2-safe/actions/workflows/ci.yml)
+[![Debian](https://img.shields.io/badge/Debian-12%20%7C%2013-A81D33?logo=debian&logoColor=white)](https://www.debian.org/)
 
-脚本默认使用你自己的域名和正规 TLS 证书，开启 UDP 端口跳跃，并每周检查 Hysteria 2 官方稳定版更新。本文按 `root` 用户编写，命令不需要加 `sudo`。
+面向 Debian 12/13 的 Hysteria 2 服务端一键安装与管理脚本。
+
+它使用你自己的域名和公开可信证书，默认开启 UDP 端口跳跃、每周自动更新 Hysteria 2，并可选启用 Telegram 成功连接提醒。本文按 `root` 用户编写，命令不需要添加 `sudo`。
 
 > [!IMPORTANT]
-> **防火墙最容易弄混：VPS 系统防火墙和云厂商防火墙是两层独立的防火墙。哪一层设置了“默认拒绝入站”，就必须在哪一层放行 SSH、TCP 80/443 和 Hy2 使用的 UDP 端口。两层都拒绝时，两层都要放行。**
+> 本项目会尽量减少常见配置错误和权限风险，但任何脚本都不能承诺“绝对没有漏洞”“永远不会被封”或“运营商一定不做 UDP QoS”。安装后仍需及时更新 Debian、保护 SSH、保管好 Hy2 密码和 Telegram Bot Token。
 
-## 这个脚本能做什么
+## 目录
 
-- 从 Hysteria 官方 GitHub 仓库安装最新稳定版，并校验官方 SHA-256。
-- 使用你自己的域名，由 Hysteria 自动申请和续期公开可信的 TLS 证书。
-- 默认开启原生 UDP 端口跳跃，范围为 `20000-50000`。
-- 不硬编码上传/下载 Mbps；服务端不采用客户端手工填写的固定速度，默认使用较稳健的自适应 BBR，根据当前整条网络路径动态升降速。
-- 使用系统密码学随机源生成约 256 bit 熵的连接密码。
-- 默认每周检查 Hysteria 官方稳定版；更新失败会自动恢复旧版本。
-- Hysteria 以独立低权限用户运行。
-- 默认返回很小的本机伪装内容，不反向代理 Bing 等第三方网站。
-- 输出官方客户端完整 YAML、官方分享链接和 v2rayN/v2rayNG 兼容链接。
-- 直接运行脚本即可打开中文管理菜单，完成安装、完整卸载和 Telegram 管理。
-- 可选开启 Telegram 成功连接提醒，并自动合并网络抖动产生的重复消息。
+- [主要功能](#主要功能)
+- [开始前准备](#开始前准备)
+- [Cloudflare DNS 设置](#cloudflare-dns-设置)
+- [防火墙和安全组](#防火墙和安全组)
+- [一行命令开始使用](#一行命令开始使用)
+- [安装时怎么填写](#安装时怎么填写)
+- [管理菜单](#管理菜单)
+- [客户端怎么连接](#客户端怎么连接)
+- [上传下载速度和 QoS](#上传下载速度和-qos)
+- [端口跳跃](#端口跳跃)
+- [域名、证书和双栈](#域名证书和双栈)
+- [伪装页面](#伪装页面)
+- [Telegram 连接提醒](#telegram-连接提醒)
+- [版本和自动更新](#版本和自动更新)
+- [完整卸载与重新安装](#完整卸载与重新安装)
+- [安全设计](#安全设计)
+- [文件位置](#文件位置)
+- [常用命令](#常用命令)
+- [常见问题](#常见问题)
+- [官方资料](#官方资料)
 
-## 开始前要准备什么
+## 主要功能
+
+- 仅支持 Debian 12/13，避免在未经验证的系统上盲目修改。
+- 从 Hysteria 官方仓库安装最新稳定版。
+- 校验 GitHub Release 元数据、文件大小、Asset SHA-256、官方 `hashes.txt` 和二进制报告版本。
+- 使用自己的域名，由 Hysteria ACME 自动申请并续期公开可信证书。
+- 客户端保持证书验证，不设置 `insecure: true`。
+- 默认开启原生 UDP 端口跳跃：`20000-50000`。
+- 不硬编码客户端上传/下载 Mbps，使用较保守的自适应 BBR。
+- Hysteria 使用独立无登录权限账号运行，只在需要端口跳跃时授予 `CAP_NET_ADMIN`。
+- 默认使用本机固定小页面作为伪装，不反向代理 Bing 等第三方大站。
+- 每周自动检查 Hysteria 官方稳定版，失败时恢复上一版本。
+- 输出官方客户端 YAML、官方分享链接及 v2rayN/v2rayNG 兼容链接。
+- 可选启用 Telegram 成功连接提醒，并合并频繁重连消息。
+- 提供中文菜单完成安装、修改、更新、查看版本、Telegram 管理和完整卸载。
+
+## 开始前准备
 
 你需要：
 
 1. 一台全新的 Debian 12 或 Debian 13 VPS。
-2. 一个由你管理的域名。
-3. 一个专门给 Hy2 使用的子域名，例如 `hy2.example.com`。
-4. VPS 的 `root` 权限。
+2. VPS 的 `root` 权限。
+3. 一个自己管理的域名。
+4. 一个专门给 Hy2 使用的子域名，例如 `hy2.example.com`。
+5. 如果使用入站默认拒绝防火墙，提前允许必要端口。
 
-如果你使用 [vps-security-bootstrap](https://github.com/elonjack/vps-security-bootstrap)，建议先运行它，再新开一个 SSH 窗口确认密钥登录正常，最后安装 Hy2。
+如果你使用 [vps-security-bootstrap](https://github.com/elonjack/vps-security-bootstrap)，推荐顺序是：
 
-## Cloudflare 域名怎么设置
+1. 运行 `vps-security-bootstrap`。
+2. 保留当前 SSH 窗口。
+3. 新开一个 SSH 窗口，确认密钥登录正常。
+4. 再安装 `hy2-safe`。
 
-假设 VPS 的公网 IPv4 是 `203.0.113.10`，你准备用 `hy2.example.com`：
+## Cloudflare DNS 设置
 
-1. 在 Cloudflare DNS 中新建一条 `A` 记录。
-2. 名称填写 `hy2`，地址填写 VPS 公网 IPv4。
-3. **代理状态选择“仅 DNS”（灰色云朵）**。
-4. VPS 确实有可用公网 IPv6 时，可以给同一名称增加 `AAAA` 记录；没有配置好就不要加。
+假设：
 
-Hy2 使用 UDP/QUIC。Cloudflare 普通小黄云不能转发这种自定义 UDP 服务，所以 Hy2 子域名不能开启小黄云。
+- VPS IPv4：`203.0.113.10`
+- VPS IPv6：`2001:db8::10`
+- Hy2 域名：`hy2.example.com`
 
-灰云会让 DNS 查询者看到 VPS IP，这是直连 Hy2 无法避免的。伪装不能隐藏入口 IP，它只能让未通过认证的普通探测看到一个正常 HTTPS 响应。
+在 Cloudflare DNS 中可以添加：
 
-## 防火墙先看懂：系统防火墙和云防火墙
+| 类型 | 名称 | 内容 | 代理状态 |
+| --- | --- | --- | --- |
+| `A` | `hy2` | VPS 公网 IPv4 | 仅 DNS，灰色云朵 |
+| `AAAA` | `hy2` | VPS 公网 IPv6 | 仅 DNS，灰色云朵 |
 
-它们不是同一个东西：
+同一个名称同时存在 `A` 和 `AAAA` 是正常的，表示这个域名同时支持 IPv4 和 IPv6。VPS 没有真正可用的公网 IPv6 时不要添加 `AAAA`。
 
-| 防火墙 | 在哪里 | 谁负责设置 |
+> [!WARNING]
+> Hy2 使用自定义 UDP/QUIC。Cloudflare 普通小黄云不能代理这种服务，因此 Hy2 域名必须保持灰云。灰云会公开 VPS IP，这是直连代理无法避免的；伪装页面不能隐藏入口 IP。
+
+## 防火墙和安全组
+
+VPS 系统防火墙和云厂商安全组是两层不同的过滤：
+
+| 类型 | 位置 | 示例 |
 | --- | --- | --- |
-| VPS 系统防火墙 | Debian 内部，例如 nftables、UFW、firewalld | 你在 VPS 中设置 |
-| 云防火墙/安全组 | 云厂商网络边界、VPS 外部 | 你在云厂商控制台设置 |
+| 系统防火墙 | Debian 内部 | nftables、UFW、firewalld |
+| 云防火墙/安全组 | 云厂商网络边界 | 控制台入站规则 |
 
-网络流量必须依次通过存在的每一层。脚本无法替你修改云厂商控制台。
+哪一层设置了“默认拒绝入站”，就必须在哪一层允许：
 
-| 实际情况 | 你要做什么 |
-| --- | --- |
-| 两层都没有默认拒绝规则 | 不需要执行“开放端口”；服务监听后就能接收流量 |
-| 只有系统防火墙默认拒绝 | 在系统防火墙放行 |
-| 只有云防火墙默认拒绝 | 在云厂商控制台放行 |
-| 两层都默认拒绝 | 两层都要放行相同的必要端口 |
-
-“不需要开放端口”只代表功能上不会被防火墙挡住，**不代表整台 VPS 更安全**。没有默认拒绝防火墙时，其他正在监听公网地址的服务也可能暴露。
-
-很多普通 VPS 没有默认拒绝防火墙也能长期正常使用，是因为没有程序监听的端口本来就无法建立连接，加上 SSH 密钥、Fail2ban、及时更新和服务自身认证，扫描者通常无法进入。默认拒绝防火墙仍然是一层额外保险：以后某个程序如果意外监听公网，它可以先把流量挡住。当前不启用默认拒绝防火墙并不等于 Hy2 密码会失效，但必须继续保护 SSH、及时更新系统并妥善保管节点密码。
-
-**所以，防火墙不是“不开就一定会被入侵”，也不是安装 Hy2 的强制条件。** 对一台全新、只运行 SSH 和 Hy2、已经使用密钥登录并及时更新的 VPS，不开启全局默认拒绝通常也能合理使用，只是少了一层保护。默认拒绝防火墙更适合防止将来误装的数据库、管理面板、Docker 容器等程序意外监听公网。脚本不会自动强开默认拒绝，因为错误规则可能直接把你的 SSH 锁在服务器外。
-
-默认配置需要允许：
-
-| 用途 | 协议 | 端口 |
+| 用途 | 协议 | 默认端口 |
 | --- | --- | --- |
-| 你实际使用的 SSH 端口 | TCP | 例如 `22`，以你的设置为准 |
-| Hysteria 自动申请和续期证书 | TCP | `80`、`443` |
-| Hy2 默认端口跳跃 | UDP | `20000-50000` |
+| SSH | TCP | 你的实际 SSH 端口 |
+| ACME 域名验证 | TCP | `80`、`443` |
+| Hy2 端口跳跃 | UDP | `20000-50000` |
 
-如果改成单端口，只需允许那个 UDP 端口；如果改了跳跃范围，就允许新的完整范围。
+如果没有任何默认拒绝规则，就不存在“先开放端口才能使用”的步骤；程序监听后公网即可访问。但这也意味着以后其他程序如果意外监听公网，不会被防火墙额外拦截。
 
-你当前使用的 `vps-security-bootstrap` 会安装 nftables，并让 Fail2ban 动态封禁攻击者，但没有建立一个全局 `input policy drop` 的默认拒绝防火墙。`hy2-safe` 也不会擅自添加入站放行规则。Hysteria 为端口跳跃建立的 nftables 重定向属于端口转发，不等于在默认拒绝防火墙中放行了这些端口。
+`hy2-safe` 不会清空、开启或重写你的系统防火墙，也无法修改云厂商控制台。Hysteria 为端口跳跃创建的临时重定向规则不等于默认拒绝防火墙中的“允许入站”规则。
 
-如果 CloudCone 控制台没有云防火墙或安全组功能，通常就没有那一层规则需要设置；仍应以你购买的具体产品控制台和文档为准。
+## 一行命令开始使用
 
-## 最简单的安装方法
-
-你平时使用 `root` 登录，可以复制下面一整行：
+以 `root` 登录 VPS，复制下面一整行：
 
 ```bash
 curl -fL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh -o /root/hy2-safe.sh && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
 ```
 
-这个写法会先把脚本保存到磁盘，再执行，不是 `curl | bash`。如果想先查看内容，使用：
+这条命令会先保存脚本，再执行本地文件，不是直接把网络内容通过管道交给 Shell。
+
+如果想先查看：
 
 ```bash
 curl -fL --proto '=https' --tlsv1.2 \
@@ -103,10 +130,46 @@ chmod 0700 /root/hy2-safe.sh
 /root/hy2-safe.sh
 ```
 
-在 `less` 中按 `q` 退出。直接运行且不附加命令时，会显示：
+在 `less` 中按 `q` 退出。
+
+第一次运行选择：
 
 ```text
-hy2-safe 一键管理菜单
+1) 安装 Hy2
+```
+
+## 安装时怎么填写
+
+| 提示 | 小白建议 |
+| --- | --- |
+| 证书/SNI 域名 | 填写灰云子域名，例如 `hy2.example.com` |
+| ACME 通知邮箱 | 填写可以接收邮件的邮箱 |
+| 开启原生端口跳跃 | 直接回车，默认开启 |
+| UDP 跳跃端口范围 | 直接回车，默认 `20000-50000` |
+| 自定义 HTTPS 伪装站点 | 直接回车，使用本机固定小页面 |
+| 每周自动更新 | 直接回车，默认开启 |
+| Telegram 提醒 | 需要时输入 `y`，暂时不需要直接回车 |
+
+Hy2 密码由系统密码学随机源自动生成。不要把客户端分享链接、密码或 Telegram Token 发到公开群、截图或 GitHub。
+
+安装结束后会输出客户端配置和分享链接。以后再次查看：
+
+```bash
+hy2-safe show-client
+```
+
+## 管理菜单
+
+安装后直接运行：
+
+```bash
+hy2-safe
+```
+
+菜单如下：
+
+```text
+hy2-safe v1.0.0 一键管理菜单
 
   1) 安装 Hy2
   2) 完整卸载 Hy2
@@ -120,59 +183,42 @@ hy2-safe 一键管理菜单
   0) 退出
 ```
 
-第一次使用选择 `1`。安装完成后，系统中也可以直接运行 `hy2-safe` 再次打开同一菜单。原有的 `hy2-safe install`、`hy2-safe update` 等命令仍然保留，方便自动化或排错。
+菜单一次执行一个操作。修改配置失败时，脚本会尝试恢复原配置；Hysteria 更新失败时，会尝试恢复上一版本。
 
-## 安装时怎么选择
+## 客户端怎么连接
 
-第一次安装可以这样填写：
-
-| 提示 | 建议填写 |
-| --- | --- |
-| 证书/SNI 域名 | `hy2.example.com` |
-| ACME 通知邮箱 | 你能正常接收邮件的邮箱 |
-| 开启原生端口跳跃 | 直接回车，默认开启 |
-| UDP 跳跃端口范围 | 直接回车，默认 `20000-50000` |
-| 自定义 HTTPS 伪装站点 | 直接回车，使用本机小型静态响应 |
-| 开启每周自动更新并在失败时回滚 | 直接回车，默认开启 |
-| 安装完成后开启 Telegram 连接提醒 | 需要就输入 `y`；暂时不需要直接回车 |
-
-密码由脚本自动生成。不要把真实密码发到公开群聊、截图或 GitHub 仓库。
-
-## 证书是谁申请、多久续期
-
-服务端配置中的 `acme` 会让 **Hysteria 自己使用 ACME 自动申请和续期证书**。当前配置使用公开可信 CA 的生产环境（默认是 Let’s Encrypt），不是 Cloudflare Origin CA 证书，也不需要你从 Cloudflare 下载证书。
-
-Cloudflare 在这里仅负责 DNS。Hy2 子域名保持灰云，域名正确指向 VPS，并让 TCP 80/443 能到达 Hysteria，才可以完成验证。
-
-证书有效期由 CA 的当期政策决定，不应在脚本中写死。Let’s Encrypt 证书属于短周期证书，Hysteria 会在需要时自动续期；证书和 ACME 状态保存在 `/var/lib/hysteria/acme`。因此正常情况下不需要手动重新申请。
-
-## 安装完成后怎么连接
-
-查看客户端信息：
+运行：
 
 ```bash
 hy2-safe show-client
 ```
 
-端口跳跃模式会输出三部分：
+端口跳跃模式会输出：
 
-1. **Hysteria 2 官方客户端完整 YAML**：包含本机 SOCKS5 监听 `127.0.0.1:1080`，可直接作为官方客户端配置使用。
-2. **Hysteria 2 官方分享链接**：端口范围直接写在地址中。
-3. **v2rayN/v2rayNG 兼容分享链接**：URI 主端口保持为数字，跳跃范围通过 `mport=20000-50000` 传递。
+1. Hysteria 2 官方客户端完整 YAML。
+2. Hysteria 2 官方分享链接。
+3. v2rayN/v2rayNG 兼容分享链接。
 
-v2rayN 和 v2rayNG 使用第三种兼容链接。建议使用较新的客户端版本；v2rayN 可优先选择支持 Hy2 的 sing-box 核心。
+### Windows 11：v2rayN
 
-官方客户端 YAML 大致如下，实际域名和密码以服务器输出为准：
+复制标有“v2rayN / v2rayNG 兼容分享链接”的那一条，在 v2rayN 中从剪贴板导入。建议使用较新的客户端版本和支持 Hy2 的核心。
+
+### Android：v2rayNG
+
+同样导入兼容分享链接。不同版本支持的参数可能不同；如果导入后没有显示端口跳跃范围，请更新客户端。
+
+### 官方客户端 YAML
+
+输出大致如下，实际内容以你的服务器为准：
 
 ```yaml
 server: "hy2.example.com:20000-50000"
-auth: 这里是脚本生成的密码
+auth: 脚本生成的随机密码
 tls:
   sni: hy2.example.com
 congestion:
   type: bbr
   bbrProfile: conservative
-fastOpen: true
 transport:
   type: udp
   udp:
@@ -182,13 +228,21 @@ socks5:
   listen: 127.0.0.1:1080
 ```
 
-### 为什么没有上传、下载 Mbps
+脚本没有开启 `fastOpen`，因此保留 SOCKS5 的正常成功/失败语义；也没有关闭证书验证。
 
-脚本有意不在服务端、官方客户端 YAML 或分享链接里填写固定的上传/下载速度。公司宽带、家庭 Wi-Fi 和手机网络的可用带宽会不断变化，不存在一个适合所有设备的固定数值。
+## 上传下载速度和 QoS
 
-Hysteria 2 一旦填写 `bandwidth.up` 或 `bandwidth.down`，相应方向可能改用固定目标速率的 Brutal。Brutal 在丢包时还可能为了达到目标速度而增加发送量；数值高于真实线路能力时，反而更容易造成拥塞、抖动和流量浪费。
+脚本不会填写固定的：
 
-本脚本生成的服务端配置使用：
+```yaml
+bandwidth:
+  up: 100 mbps
+  down: 500 mbps
+```
+
+原因是手机、公司网络、家庭 Wi-Fi、距离路由器远近、运营商线路和晚高峰都会改变实际带宽。不存在一组适合所有设备的固定数值。
+
+服务端使用：
 
 ```yaml
 ignoreClientBandwidth: true
@@ -197,126 +251,23 @@ congestion:
   bbrProfile: conservative
 ```
 
-这里不是“不信任你自己的设备或连接身份”，而是不采用手工填写、可能已经不符合当前 Wi-Fi/手机网络状况的固定 Mbps。BBR 会根据设备到 VPS 的整条路径，包括本地 Wi-Fi、运营商线路和 VPS 出入口的实际传输情况动态调整。官方客户端 YAML 同样明确选择 `bbrProfile: conservative`。分享链接不包含带宽值，这也符合 Hysteria 2 官方 URI 规范；该规范明确说明带宽属于每个客户端自己的本地参数，不应写进分享链接。
+这里不是不信任你的设备身份，而是不采用客户端手工填写、可能已经不符合当前网络状况的固定 Mbps。BBR 会根据设备到 VPS 的整条实际路径动态调整发送速度。
 
-这项设置可以降低错误带宽参数导致的激进发包风险，但无法保证运营商一定不做 UDP QoS，也无法保证 IP 永不受限。Hy2 本身仍然是 UDP/QUIC 协议；实际传输大量数据时仍会产生相应 UDP 流量。
+这可以避免错误的高带宽数值触发 Brutal 丢包补偿，但不能保证运营商永远不做 UDP QoS。持续跑满带宽或短时间传输大量流量，仍可能触发运营商或 VPS 厂商的限制。
 
-分享链接会明确带上 `insecure=0`，不会关闭证书验证。
+Hysteria 官方 URI 规范也说明，带宽属于客户端本地参数，不应写进通用分享链接。
 
-## Telegram 连接提醒
+## 端口跳跃
 
-这是可选功能，默认不启用。正常执行一键安装时，Hy2 启动成功并输出客户端配置后，脚本会直接询问：
-
-```text
-是否现在开启 Telegram 成功连接提醒？[y/N]:
-```
-
-输入 `y` 会在同一次一键脚本中继续配置；直接回车则跳过。保留独立的 `hy2-safe telegram-setup` 命令，是为了以后补开提醒、更换机器人或重新设置时不需要重装 Hy2。建议专门创建一个只用于 Hy2 提醒的新机器人，不要复用正在处理其他命令或 webhook 的机器人。
-
-### 第一次设置
-
-如果 VPS 以前安装过旧版 `hy2-safe`，运行 `hy2-safe telegram-setup` 提示未知命令，先安全更新管理脚本：
-
-```bash
-curl -fL --proto '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh \
-  -o /root/hy2-safe.sh
-chmod 0700 /root/hy2-safe.sh
-/root/hy2-safe.sh install --reinstall --non-interactive
-```
-
-1. 在 Telegram 中找到官方的 `@BotFather`。
-2. 发送 `/newbot`，按照提示创建机器人并得到 Bot Token。
-3. 打开刚创建的机器人，给它发送任意一条私人消息。
-4. 如果当前仍处于一键安装的 Telegram 提示中，直接输入 `y` 并跟随提示。如果安装时已经跳过，之后执行：
-
-```bash
-hy2-safe telegram-setup
-```
-
-5. 粘贴 Bot Token。输入时终端不会显示字符，这是正常的。
-6. 脚本会通过 Telegram 官方接口列出最近给机器人发过消息的私人 Chat ID。
-7. 只选择属于你自己的 Chat ID。
-8. 收到测试消息并且服务检查通过后，提醒才算启用。
-
-运行期间，机器人不会读取命令、不会设置 webhook，也不会回复其他用户；它只会向设置时确认的那个私人 Chat ID 主动发送消息。设置阶段会读取一次最近私人消息，用来帮助你找到自己的 Chat ID。
-
-### IP 怎么显示
-
-机器人不会发送完整客户端 IP：
-
-- IPv4 `123.45.67.89` 显示为 `123.45.67.*`。
-- IPv6 `2408:8215:1234:5678:...` 显示为 `2408:8215:1234:*`。
-
-IPv4 只隐藏最后一段，比隐藏最后两段更适合安全提醒：既不显示完整地址，又能区分大多数不同网络。提醒程序自己的状态文件只保存上述已隐藏网段，不额外保存完整 IP；但 Hysteria 原始服务日志本身仍可能按照 systemd journal 的保留策略包含完整连接地址。
-
-### 怎么防止晚高峰刷屏
-
-- 第一次出现的新 IP 网段会立即提醒。
-- 同一个 IPv4 `/24` 网段或 IPv6 `/48` 网段反复重连时，一小时内不逐条发送。
-- 一小时后只发送一条合并汇总，告诉你重复连接次数、第一次和最近一次连接时间。
-- 同一网段超过 24 小时没有出现，后来再次连接时会重新立即提醒。
-- 每天发送一份连接来源汇总。
-- 当前在线客户端数量来自只监听 `127.0.0.1`、带随机密钥保护的 Hysteria Traffic Stats API，不向公网开放。
-- Telegram 暂时不可用时，消息会留在受限状态文件中稍后重试；提醒故障不会参与或阻断 Hy2 认证和转发。
-
-示例：
+默认范围：
 
 ```text
-Hy2 重连汇总
-
-IP（已隐藏最后一部分）：123.45.67.*
-首次发现：2026-07-29 20:06:12
-最近连接：2026-07-29 20:48:35
-本次合并的重复连接：12 次
-当前在线客户端：1
+UDP 20000-50000
 ```
 
-常用命令：
+这不代表同时建立三万个连接，也不代表同时向三万个端口发送数据。客户端会随机选择一个端口，并在 `15-45` 秒之间随机更换；服务端把范围内端口重定向到实际监听端口。
 
-```bash
-# 发送一条测试消息
-hy2-safe telegram-test
-
-# 查看提醒服务日志
-hy2-safe telegram-logs
-
-# 查看 Hy2 和提醒服务状态
-hy2-safe status
-
-# 关闭提醒并从配置中删除 Bot Token
-hy2-safe telegram-disable
-
-# 更换机器人：新机器人测试成功后才替换，失败则保留旧机器人
-hy2-safe telegram-replace
-```
-
-Bot Token 保存在 root-only 的 `0600` 配置文件中，并通过 systemd 凭据功能只交给受限的提醒进程。不要把 Token 发到聊天群、截图或 GitHub；如果 Token 泄露，应立即在 `@BotFather` 撤销并重新生成。
-
-## IPv4、IPv6、域名和证书
-
-一个客户端节点的“服务器地址”不一定只能写一个 IP，也可以写域名：
-
-- `hy2.example.com` 同时有 `A` 和 `AAAA` 记录时，一个节点可以解析出 IPv4 和 IPv6。最终使用哪个地址由客户端核心、系统 DNS 和路由策略决定，**不保证先测速再自动选择最优线路**。
-- 如果节点地址直接填写 IPv4，那么它只会走 IPv4。
-- 如果节点地址直接填写 IPv6，那么它只会走 IPv6。
-
-因此，你说的“建两个节点，一个写 IPv4、一个写 IPv6，自己手动选择”是对的。关键是两个节点都把 TLS 的 SNI/服务器名称设为同一个 `hy2.example.com`：
-
-| 节点 | 连接地址 | TLS SNI |
-| --- | --- | --- |
-| Hy2-IPv4 | VPS 的 IPv4 | `hy2.example.com` |
-| Hy2-IPv6 | VPS 的 IPv6 | `hy2.example.com` |
-
-这样仍然只需要 **一张 `hy2.example.com` 的证书**。证书验证的是 TLS SNI 域名，不要求连接地址也必须是域名。
-
-不要为了区分线路直接改用 `hy2-v4.example.com` 和 `hy2-v6.example.com`，除非证书也同时包含这两个名称。当前脚本一次配置一个证书域名，最简单可靠的做法是两个节点共用同一个 SNI。
-
-服务端的 `listen: ":端口"` 按 Hysteria 官方定义会监听所有可用 IPv4 和 IPv6 接口，但 VPS 本身必须真正拥有可用公网 IPv6，云厂商和系统防火墙也必须允许相应流量。
-
-## 端口跳跃有什么用
-
-单个 UDP 端口在某些网络中可能被限速、干扰或封锁。端口跳跃让客户端定期更换目标端口，可以减少只针对单端口的干扰，但不能保证绕过所有封锁或 QoS。
+端口跳跃可以缓解部分只针对单一 UDP 端口的限速或封锁，但不能绕过所有网络限制。
 
 修改范围：
 
@@ -328,24 +279,46 @@ hy2-safe configure \
   --non-interactive
 ```
 
-关闭跳跃并改成单个 UDP 端口：
+切换单端口：
 
 ```bash
 hy2-safe configure --port 443 --non-interactive
 ```
 
-修改后要同步检查系统防火墙和云防火墙。
+修改后记得同步调整所有启用默认拒绝的防火墙层。
 
-## “伪装域名”到底是什么
+## 域名、证书和双栈
 
-这里有两个容易混淆的概念：
+脚本配置 Hysteria ACME，由 Hysteria 自动申请和续期公开可信证书。证书和 ACME 状态保存在：
 
-- **Hy2 域名**：例如 `hy2.example.com`，用于连接、TLS SNI 和申请证书，必须由你控制。
-- **伪装内容来源**：未通过 Hy2 认证的普通 HTTPS 请求所看到的内容。
+```text
+/var/lib/hysteria/acme
+```
 
-脚本默认返回固定的小型本机响应，不连接 Bing 或其他上游网站。这比反向代理一个大型第三方网站更可控，也避免别人反复请求伪装入口，迫使 VPS 从上游下载大文件。
+这不是 Cloudflare Origin CA 证书。Cloudflare 在默认方案中只负责 DNS。
 
-如果你确实有自己控制的正常 HTTPS 网站，可以设置为伪装来源：
+服务端监听写法为 `:端口` 或 `:端口范围`，按照 Hysteria 官方定义会监听所有可用 IPv4 和 IPv6 接口。
+
+同一域名可以同时有 `A` 和 `AAAA`，同一张域名证书可用于该域名通过 IPv4 或 IPv6 建立的连接。客户端最终使用哪一个地址取决于客户端核心、DNS 和系统路由策略，不保证一定自动选择速度更快的线路。
+
+如果想手工区分，可以分别创建：
+
+- `hy2-v4.example.com`：只设置 `A`。
+- `hy2-v6.example.com`：只设置 `AAAA`。
+
+两个不同域名通常分别申请证书，或者放进同一张包含两个域名的证书。本脚本默认使用一个域名和一张证书。
+
+## 伪装页面
+
+伪装的作用是让未通过 Hy2 认证的普通 HTTP/3 探测看到正常响应。它不能：
+
+- 隐藏 VPS IP。
+- 代替 Hy2 密码。
+- 保证绕过所有识别或封锁。
+
+默认模式返回本机固定小页面，不请求 Bing、Google 等上游网站，因此陌生人反复探测不会迫使 VPS 下载上游大文件。
+
+如果你确实有自己控制的 HTTPS 网站：
 
 ```bash
 hy2-safe configure \
@@ -353,26 +326,333 @@ hy2-safe configure \
   --non-interactive
 ```
 
-伪装来源不能与 Hy2 域名相同，否则可能形成代理循环。切回默认本机响应：
+切回默认本机页面：
 
 ```bash
 hy2-safe configure --static-masquerade --non-interactive
 ```
 
-## 会不会被偷跑流量
+自定义反代目标必须是公开 HTTPS 域名，不能解析到私网、环回或保留地址，也不能与 Hy2 域名相同。反代站点的 DNS 以后发生变化仍可能改变风险，因此不需要真实站点时优先使用默认模式。
 
-脚本生成 32 个密码学随机字节，再编码为 43 个 Base64URL 字符，搜索空间约为 `2^256`。
+## Telegram 连接提醒
 
-严谨地说，任何有限密码都不能宣称“数学上绝对不可能猜中”。但在随机源正常、密码没有泄露的前提下，通过公网逐个尝试穷举 256 bit 随机值在现实计算能力和时间尺度上不可行。
+Telegram 功能默认关闭。它只监听 Hysteria 的“认证成功连接”日志，不参与 Hy2 密码验证；Telegram 网络故障不会阻止 Hy2 服务运行。
 
-更现实的风险是：
+### 添加提醒
 
-- 把分享链接或客户端配置发到了公开位置。
-- 客户端设备、中转剪贴板、网盘或聊天账号被入侵。
-- 使用反向代理大型网站作为伪装来源，造成公开可触发的流量消耗。
-- 公网 UDP 服务遭遇扫描、洪泛或 DDoS；强密码不能阻止这种攻击。
+1. 在 Telegram 中找到官方 `@BotFather`。
+2. 发送 `/newbot` 创建一个专用机器人。
+3. 打开新机器人，给它发送任意私人消息。
+4. 运行 `hy2-safe`，选择 `3) 添加 Telegram 通知`。
+5. 输入 Bot Token。输入时终端不会显示字符。
+6. 选择属于自己的私人 Chat ID。
+7. 收到测试消息后配置才会生效。
 
-如果怀疑泄露，可以用下面的方法安全生成并换成新密码，然后删除所有旧客户端配置：
+建议创建专门用于 Hy2 的机器人，不要复用正在使用 webhook 或处理其他命令的机器人。
+
+### 消息如何防刷屏
+
+- 新的 IPv4 `/24` 或 IPv6 `/48` 来源：立即提醒。
+- 同一网段短时间频繁重连：一小时合并一次。
+- 超过 24 小时没有出现后再次连接：重新提醒。
+- 每天发送一份汇总。
+- IPv4 显示为 `123.45.67.*`。
+- IPv6 只显示前 48 bit，例如 `2408:8215:1234:*`。
+
+“隐藏”表示消息中不显示完整 IP，不代表服务器日志中不存在原始连接地址。
+
+### 更换机器人
+
+菜单选择 `4) 更换 Telegram 机器人`，或者：
+
+```bash
+hy2-safe telegram-replace
+```
+
+新 Token、Chat ID 和测试消息全部验证成功后才会替换；失败时继续保留旧机器人。
+
+### 删除提醒
+
+菜单选择 `5) 删除 Telegram 通知`，或者：
+
+```bash
+hy2-safe telegram-disable
+```
+
+这会停止提醒服务，删除 Bot Token 和通知状态。通用提醒程序文件会随 Hy2 完整卸载一起删除。
+
+### Telegram 安全边界
+
+- Bot Token 保存在 root-only 的 `0600` 文件中。
+- systemd 通过凭据目录把 Token 交给隔离的动态用户。
+- Hysteria 流量统计 API 只监听 `127.0.0.1`，并使用随机密钥。
+- 提醒只发送给配置时确认的固定私人 Chat ID。
+- 机器人不会在后台轮询陌生人的命令。
+
+如果 Token 泄露，请先在 `@BotFather` 撤销，然后使用“更换 Telegram 机器人”。
+
+## 版本和自动更新
+
+查看管理脚本和 Hysteria 核心版本：
+
+```bash
+hy2-safe version
+```
+
+查看版本、服务、Telegram 和下次自动更新时间：
+
+```bash
+hy2-safe status
+```
+
+默认启用：
+
+```text
+hy2-safe-update.timer
+```
+
+它每周检查 Hysteria 官方最新稳定版，并随机延迟最多 12 小时。`Persistent=true` 表示错过计划时间时，会在 VPS 下次运行后补做检查。
+
+自动更新流程：
+
+1. 读取官方 GitHub Latest Release。
+2. 拒绝草稿、预发布和异常版本号。
+3. 校验官方仓库、下载地址、文件大小和两个 SHA-256 来源。
+4. 验证下载的二进制报告版本与 Release 一致。
+5. 拒绝自动降级。
+6. 原子替换程序并重启服务。
+7. 新版本启动失败时恢复上一版本。
+
+菜单 `8) 立即检查更新` 只是马上手动检查一次，不会关闭每周自动更新。
+
+> [!NOTE]
+> 自动更新只更新 Hysteria 官方核心，不会远程替换 `hy2-safe` 管理脚本。重新执行 README 的一行下载命令并打开菜单，会把最新管理脚本同步到 `/usr/local/sbin/hy2-safe`。
+
+## 完整卸载与重新安装
+
+运行：
+
+```bash
+hy2-safe
+```
+
+选择：
+
+```text
+2) 完整卸载 Hy2
+```
+
+脚本会列出删除范围，并要求输入 `DELETE`。完整卸载会删除：
+
+- Hysteria 当前版本和回滚版本。
+- `hy2-safe` 管理脚本及推荐下载位置 `/root/hy2-safe.sh`。
+- systemd 服务和自动更新任务。
+- Hy2 服务端配置、密码和客户端信息。
+- ACME 证书和账户状态。
+- Telegram Bot Token 和通知状态。
+
+脚本不会自动卸载 `curl`、`python3` 等通用依赖，也会保留无登录权限的 `hysteria` 系统账号，避免误伤其他程序。这些内容不会阻止下次安装。
+
+重新安装时，再次执行 README 的一行命令即可。Hysteria 会重新验证域名并申请新证书。
+
+> [!WARNING]
+> 不要在短时间内反复完整卸载重装。删除 ACME 状态后会重新签发证书，可能触发 CA 频率限制。重新安装前先确认域名、灰云和 TCP 80/443 正确，避免连续验证失败。
+
+## 安全设计
+
+### 下载与更新
+
+- 只接受 `apernet/hysteria` 官方稳定 Release。
+- 版本号必须匹配 `app/v数字.数字.数字`。
+- 下载 URL 必须与官方仓库、版本和架构完全匹配。
+- 限制元数据、哈希文件和二进制最大体积。
+- 同时验证 GitHub Asset digest 和官方 `hashes.txt`。
+- 验证二进制自身报告版本。
+- 不自动降级。
+- 更新失败自动尝试回滚。
+
+### 权限
+
+- Hysteria 使用独立 `hysteria` 无登录账号。
+- 脚本拒绝复用具有登录 Shell、错误家目录、额外组权限或共享成员的同名账号/组。
+- 单端口只授予 `CAP_NET_BIND_SERVICE`。
+- 端口跳跃额外授予必需的 `CAP_NET_ADMIN` 和 `AF_NETLINK`。
+- systemd 启用文件系统、设备、内核、`/proc` 和可写执行内存限制。
+
+### 密钥和配置
+
+- Hy2 密码约有 256 bit 随机熵。
+- 管理设置和 Telegram Token 为 root-only `0600`。
+- Hysteria 配置为 `0640 root:hysteria`。
+- 客户端保持证书验证。
+- Telegram Token 不接受命令行明文参数。
+
+### 不会自动做的事
+
+- 不修改 SSH 设置。
+- 不开启或重写系统防火墙。
+- 不修改云厂商安全组。
+- 不隐藏 VPS IP。
+- 不保证绕过所有 QoS 或封锁。
+- 不自动更新 `hy2-safe` 自身。
+
+## 文件位置
+
+| 路径 | 用途 |
+| --- | --- |
+| `/usr/local/bin/hysteria` | 当前 Hysteria 核心 |
+| `/usr/local/bin/hysteria.previous` | 更新回滚版本 |
+| `/usr/local/sbin/hy2-safe` | 管理脚本 |
+| `/etc/hysteria/config.yaml` | Hysteria 服务端配置 |
+| `/etc/hysteria/hy2-safe.env` | root-only 管理设置 |
+| `/etc/hysteria/telegram-notifier.json` | root-only Telegram 凭据 |
+| `/var/lib/hysteria/acme` | ACME 证书和账户状态 |
+| `/usr/local/libexec/hy2-safe-notifier.py` | Telegram 提醒程序 |
+| `/var/lib/private/hy2-safe-notifier` | Telegram 防刷屏状态 |
+| `/etc/systemd/system/hysteria-server.service` | Hy2 服务 |
+| `/etc/systemd/system/hy2-safe-update.timer` | 每周自动更新 |
+| `/etc/systemd/system/hy2-safe-notifier.service` | Telegram 提醒服务 |
+
+## 常用命令
+
+```bash
+# 打开中文菜单
+hy2-safe
+
+# 查看管理脚本和 Hysteria 核心版本
+hy2-safe version
+
+# 查看服务和自动更新状态
+hy2-safe status
+
+# 显示客户端 YAML 和分享链接
+hy2-safe show-client
+
+# 交互修改域名、端口、密码或伪装
+hy2-safe configure
+
+# 立即检查 Hysteria 官方稳定版
+hy2-safe update
+
+# 查看 Hy2 日志
+hy2-safe logs
+
+# 添加或重新设置 Telegram
+hy2-safe telegram-setup
+
+# 安全更换 Telegram 机器人
+hy2-safe telegram-replace
+
+# 发送 Telegram 测试消息
+hy2-safe telegram-test
+
+# 查看 Telegram 提醒日志
+hy2-safe telegram-logs
+
+# 删除 Telegram Token 和通知状态
+hy2-safe telegram-disable
+
+# 完整卸载
+hy2-safe uninstall
+```
+
+自动化安装示例：
+
+```bash
+/root/hy2-safe.sh install \
+  --domain hy2.example.com \
+  --email admin@example.com \
+  --port-hopping 20000-50000 \
+  --static-masquerade \
+  --auto-update \
+  --non-interactive
+```
+
+自动化时如果要指定密码，推荐使用仅 root 可读的文件：
+
+```bash
+openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n' > /root/hy2-password
+chmod 0600 /root/hy2-password
+
+/root/hy2-safe.sh install \
+  --domain hy2.example.com \
+  --email admin@example.com \
+  --password-file /root/hy2-password \
+  --non-interactive
+
+rm -f /root/hy2-password
+```
+
+## 常见问题
+
+### 安装成功但客户端连不上
+
+依次检查：
+
+1. `hy2-safe status` 中服务是否正在运行。
+2. `hy2-safe show-client` 的域名、密码和端口是否与客户端一致。
+3. Cloudflare 是否为灰云。
+4. DNS `A`/`AAAA` 是否指向这台 VPS。
+5. 所有默认拒绝防火墙层是否允许完整 UDP 范围。
+6. 本地网络是否封锁 UDP/QUIC。
+7. v2rayN/v2rayNG 是否正确识别 `mport`。
+8. 使用 `hy2-safe logs` 查看错误。
+
+### 证书申请失败
+
+常见原因：
+
+- 域名没有解析到本机。
+- Cloudflare 开启了小黄云。
+- TCP 80/443 被系统防火墙或云防火墙阻挡。
+- 80/443 被 Nginx、Caddy、Apache 等程序占用。
+- 短时间连续失败或重新签发触发 CA 限制。
+
+修正后使用：
+
+```bash
+hy2-safe install --reinstall
+```
+
+### 端口跳跃无法启动
+
+检查：
+
+```bash
+command -v nft
+command -v iptables
+hy2-safe logs
+```
+
+端口范围模式需要 nftables 或 iptables，并需要服务拥有 `CAP_NET_ADMIN`。脚本只在端口范围模式下授予该能力。
+
+### Telegram 没有消息
+
+```bash
+hy2-safe telegram-test
+hy2-safe telegram-logs
+hy2-safe status
+```
+
+确认：
+
+- Bot Token 没有被 `@BotFather` 撤销。
+- 你没有把机器人改成 webhook 专用机器人。
+- VPS 可以访问 `api.telegram.org`。
+- 提醒服务正在运行。
+
+### 会不会被别人偷跑流量
+
+攻击者必须先获得 Hy2 密码才能作为客户端使用节点。脚本生成的随机密码无法通过现实可行的公网穷举直接猜出。
+
+更常见的风险是：
+
+- 分享链接被发到群聊或公开仓库。
+- 客户端配置截图泄露。
+- VPS 的 root 权限被入侵。
+- Telegram 或剪贴板同步泄露。
+
+怀疑泄露时应更换密码，并删除所有旧客户端配置：
 
 ```bash
 openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n' > /root/hy2-new-password
@@ -381,105 +661,25 @@ hy2-safe configure --password-file /root/hy2-new-password --non-interactive
 rm -f /root/hy2-new-password
 ```
 
-## 自动更新怎么工作
+### 没开防火墙是否一定不安全
 
-默认启用 `hy2-safe-update.timer`，每周检查 Hysteria 官方最新稳定版。
+不是“不开就一定被入侵”，但会少一层保护。没有程序监听的端口本来无法连接；正在监听公网的服务则必须依靠自身认证和更新保证安全。
 
-更新会核对下载地址、文件大小、GitHub Release 元数据和官方 SHA-256，不会自动降级。替换后会重启并检查服务，启动失败则恢复上一版本。自动更新只更新 Hysteria 官方核心，不会远程替换 `hy2-safe` 管理脚本。
-
-菜单中的 `8) 立即检查更新` 只是现在手动检查一次，不会关闭或替代每周自动更新。选择 `9) 查看版本、服务和自动更新状态` 会先显示当前 Hysteria 2 版本、服务是否运行、每周自动更新是否开启及下次检查时间，然后再显示详细 systemd 状态。
-
-```bash
-systemctl list-timers hy2-safe-update.timer
-journalctl -u hy2-safe-update.service
-```
-
-关闭自动更新：
-
-```bash
-hy2-safe configure --no-auto-update --non-interactive
-```
-
-## 常用管理命令
-
-```bash
-# 查看服务状态和当前版本
-hy2-safe status
-
-# 显示客户端配置和分享链接
-hy2-safe show-client
-
-# 修改域名、端口、密码或伪装设置
-hy2-safe configure
-
-# 立即检查并安装官方稳定版
-hy2-safe update
-
-# 查看最近日志
-hy2-safe logs
-
-# 完整卸载服务、配置、证书、密码和 Telegram 数据
-hy2-safe uninstall
-```
-
-## 常见问题
-
-### 证书申请失败
-
-依次检查：
-
-- Hy2 域名是否正确指向本 VPS。
-- Cloudflare 是否为灰云“仅 DNS”。
-- 云防火墙和系统防火墙中，TCP 80/443 是否都能到达 VPS。
-- TCP 80/443 是否被其他程序占用。
-
-### 安装成功但客户端连不上
-
-依次检查：
-
-- 所有启用入站过滤的防火墙层是否允许完整 UDP 范围。
-- 客户端是否使用 `hy2-safe show-client` 输出的域名、密码和端口范围。
-- v2rayN/v2rayNG 是否导入了带 `mport` 的兼容链接。
-- 本地网络是否限制 UDP/QUIC。
-- `hy2-safe status` 和 `hy2-safe logs` 是否有错误。
-
-### 和 vps-security-bootstrap 一起怎么用
-
-推荐顺序：
-
-1. 运行 `vps-security-bootstrap`。
-2. 新开 SSH 窗口确认密钥登录正常。
-3. 运行 `hy2-safe`。
-4. 如果将来增加默认拒绝防火墙，先允许实际 SSH TCP 端口、TCP 80/443、Hy2 的完整 UDP 范围，再启用默认拒绝。
-5. 云厂商控制台另有防火墙时，也要在那里设置一次。
-
-## 卸载
-
-最方便的方法是运行 `hy2-safe`，选择 `2) 完整卸载 Hy2`。也可以直接执行：
-
-```bash
-hy2-safe uninstall
-```
-
-由于卸载会永久删除客户端密码、ACME 证书和 Telegram Token，脚本会要求输入 `DELETE` 再执行。卸载后会删除：
-
-- Hysteria 当前程序和回滚用旧版本；
-- `/usr/local/sbin/hy2-safe`、推荐下载位置 `/root/hy2-safe.sh` 及全部 systemd 服务；
-- `/etc/hysteria` 中的服务端配置、密码和 Telegram Token；
-- `/var/lib/hysteria` 中的 ACME 证书；
-- Telegram 通知运行状态。
-
-脚本不会自动卸载 `curl`、`python3` 等通用系统依赖，也会保留无登录权限的 `hysteria` 低权限系统账号，避免误伤其他程序；这些内容不会导致下次安装报错。完整卸载后重新下载脚本并选择安装，就是一次全新安装。
-
-重新安装时，Hysteria 会像第一次安装一样通过 ACME 重新申请证书。只要域名仍正确指向 VPS、Cloudflare 保持灰云、TCP 80/443 可达，并且没有触发证书机构的频率限制，就可以正常签发。正常完整卸载一次后再安装通常没有问题，但不要为了测试在短时间内连续完整卸载重装；删除 ACME 状态后每次都会重新签发新证书。
-
-自动化场景可以使用 `hy2-safe uninstall --yes` 跳过确认，但不建议手工使用时省略确认。
+默认拒绝防火墙主要防止以后误装的数据库、管理面板或 Docker 容器意外暴露公网。启用前必须先允许 SSH，避免把自己锁在服务器外。
 
 ## 官方资料
 
-- [Hysteria 2 服务端配置](https://v2.hysteria.network/docs/getting-started/Server/)
-- [Hysteria 2 客户端配置](https://v2.hysteria.network/docs/getting-started/Client/)
+- [Hysteria 2 服务端入门](https://v2.hysteria.network/docs/getting-started/Server/)
+- [Hysteria 2 完整服务端配置](https://v2.hysteria.network/docs/advanced/Full-Server-Config/)
 - [Hysteria 2 完整客户端配置](https://v2.hysteria.network/docs/advanced/Full-Client-Config/)
 - [Hysteria 2 端口跳跃](https://v2.hysteria.network/docs/advanced/Port-Hopping/)
-- [Hysteria 2 URI 格式](https://v2.hysteria.network/docs/developers/URI-Scheme/)
-- [Hysteria 官方 Releases](https://github.com/apernet/hysteria/releases)
+- [Hysteria 2 URI 规范](https://v2.hysteria.network/docs/developers/URI-Scheme/)
+- [Hysteria 2 流量统计 API](https://v2.hysteria.network/docs/advanced/Traffic-Stats-API/)
+- [Telegram Bot API](https://core.telegram.org/bots/api)
+- [Let’s Encrypt 频率限制](https://letsencrypt.org/docs/rate-limits/)
+
+## 版本
+
+当前管理脚本正式版本：`v1.0.0`
+
+Release 页面：[elonjack/hy2-safe/releases](https://github.com/elonjack/hy2-safe/releases)
