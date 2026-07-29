@@ -12,6 +12,7 @@
 - 从 Hysteria 官方 GitHub 仓库安装最新稳定版，并校验官方 SHA-256。
 - 使用你自己的域名，由 Hysteria 自动申请和续期公开可信的 TLS 证书。
 - 默认开启原生 UDP 端口跳跃，范围为 `20000-50000`。
+- 不硬编码上传/下载 Mbps；服务端拒绝客户端提交的固定带宽值，默认使用较稳健的自适应 BBR，避免错误带宽触发 Brutal 丢包补偿。
 - 使用系统密码学随机源生成约 256 bit 熵的连接密码。
 - 默认每周检查 Hysteria 官方稳定版；更新失败会自动恢复旧版本。
 - Hysteria 以独立低权限用户运行。
@@ -150,6 +151,9 @@ server: "hy2.example.com:20000-50000"
 auth: 这里是脚本生成的密码
 tls:
   sni: hy2.example.com
+congestion:
+  type: bbr
+  bbrProfile: conservative
 fastOpen: true
 transport:
   type: udp
@@ -159,6 +163,25 @@ transport:
 socks5:
   listen: 127.0.0.1:1080
 ```
+
+### 为什么没有上传、下载 Mbps
+
+脚本有意不在服务端、官方客户端 YAML 或分享链接里填写固定的上传/下载速度。公司宽带、家庭 Wi-Fi 和手机网络的可用带宽会不断变化，不存在一个适合所有设备的固定数值。
+
+Hysteria 2 一旦填写 `bandwidth.up` 或 `bandwidth.down`，相应方向可能改用固定目标速率的 Brutal。Brutal 在丢包时还可能为了达到目标速度而增加发送量；数值高于真实线路能力时，反而更容易造成拥塞、抖动和流量浪费。
+
+本脚本生成的服务端配置使用：
+
+```yaml
+ignoreClientBandwidth: true
+congestion:
+  type: bbr
+  bbrProfile: conservative
+```
+
+这表示服务端不会采信客户端随意填写的 Mbps，而是使用会根据网络状况自行调整的非 Brutal 拥塞控制。官方客户端 YAML 同样明确选择 `bbrProfile: conservative`。分享链接不包含带宽值，这也符合 Hysteria 2 官方 URI 规范；该规范明确说明带宽属于每个客户端自己的本地参数，不应写进分享链接。
+
+这项设置可以降低错误带宽参数导致的激进发包风险，但无法保证运营商一定不做 UDP QoS，也无法保证 IP 永不受限。Hy2 本身仍然是 UDP/QUIC 协议；实际传输大量数据时仍会产生相应 UDP 流量。
 
 分享链接会明确带上 `insecure=0`，不会关闭证书验证。
 
