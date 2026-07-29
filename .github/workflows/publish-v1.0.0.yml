@@ -1,0 +1,80 @@
+name: Publish v1.0.0
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Publish audited release
+    if: github.event.head_commit.message == 'Publish v1.0.0 release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Create release and verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: e34a8831cc83e2a4722ccd4f9a446062bad20f12
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          release_dir="$RUNNER_TEMP/hy2-safe-v1.0.0"
+          mkdir -p "$release_dir"
+
+          curl \
+            --fail \
+            --location \
+            --proto '=https' \
+            --proto-redir '=https' \
+            --tlsv1.2 \
+            --retry 3 \
+            --max-time 180 \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${RELEASE_COMMIT}/hy2-safe.sh" \
+            --output "$release_dir/hy2-safe.sh"
+          chmod 0755 "$release_dir/hy2-safe.sh"
+          (
+            cd "$release_dir"
+            sha256sum hy2-safe.sh > hy2-safe.sh.sha256
+          )
+
+          cat > "$release_dir/notes.md" <<'EOF'
+          ## hy2-safe v1.0.0
+
+          首个正式稳定版，面向 Debian 12/13。
+
+          ### 主要功能
+
+          - 中文一键菜单：安装、修改、更新、查看状态和完整卸载。
+          - 使用自己的域名与 Hysteria ACME 公开可信证书。
+          - 默认原生 UDP 端口跳跃 `20000-50000`。
+          - 不写死上传下载带宽，使用保守的自适应 BBR。
+          - 每周校验并更新 Hysteria 官方稳定版，失败自动回滚。
+          - Hysteria 以不可登录的独立账户和加固的 systemd 服务运行。
+          - 可选 Telegram 成功连接提醒，自动合并频繁重连。
+          - 输出官方客户端 YAML 和 v2rayN/v2rayNG 兼容链接。
+
+          ### 发布前验证
+
+          - `bash -n hy2-safe.sh`
+          - `shellcheck --severity=warning hy2-safe.sh`
+          - `python3 tests/static_checks.py`
+
+          三项检查均已在 GitHub Actions 的 Ubuntu 环境通过。
+
+          下载后可使用同页的 `hy2-safe.sh.sha256` 校验脚本。完整安装与防火墙、Cloudflare、证书、客户端和 Telegram 说明请阅读仓库 README。
+          EOF
+
+          gh release create v1.0.0 \
+            "$release_dir/hy2-safe.sh" \
+            "$release_dir/hy2-safe.sh.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$RELEASE_COMMIT" \
+            --title "hy2-safe v1.0.0" \
+            --notes-file "$release_dir/notes.md" \
+            --latest
