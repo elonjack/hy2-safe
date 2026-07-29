@@ -21,6 +21,7 @@ readonly RELEASE_URL="https://github.com/${REPOSITORY}/releases/download"
 readonly BIN_PATH="/usr/local/bin/hysteria"
 readonly PREVIOUS_BIN_PATH="/usr/local/bin/hysteria.previous"
 readonly MANAGER_PATH="/usr/local/sbin/hy2-safe"
+readonly DEFAULT_DOWNLOAD_PATH="/root/hy2-safe.sh"
 readonly CONFIG_DIR="/etc/hysteria"
 readonly CONFIG_PATH="${CONFIG_DIR}/config.yaml"
 readonly SETTINGS_PATH="${CONFIG_DIR}/hy2-safe.env"
@@ -32,6 +33,7 @@ readonly NOTIFIER_PATH="/usr/local/libexec/hy2-safe-notifier.py"
 readonly NOTIFIER_CONFIG_PATH="${CONFIG_DIR}/telegram-notifier.json"
 readonly NOTIFIER_SERVICE_PATH="/etc/systemd/system/hy2-safe-notifier.service"
 readonly NOTIFIER_STATE_DIR="/var/lib/hy2-safe-notifier"
+readonly NOTIFIER_PRIVATE_STATE_DIR="/var/lib/private/hy2-safe-notifier"
 readonly SERVICE_NAME="hysteria-server.service"
 readonly TIMER_NAME="hy2-safe-update.timer"
 readonly NOTIFIER_NAME="hy2-safe-notifier.service"
@@ -67,6 +69,7 @@ usage() {
 hy2-safe - 安全、精简的 Hysteria 2 服务端管理器
 
 用法：
+  ./hy2-safe.sh                 打开中文管理菜单
   ./hy2-safe.sh install [选项]
   hy2-safe configure [选项]
   hy2-safe update [--quiet]
@@ -77,7 +80,8 @@ hy2-safe - 安全、精简的 Hysteria 2 服务端管理器
   hy2-safe telegram-test
   hy2-safe telegram-logs
   hy2-safe telegram-disable
-  hy2-safe uninstall
+  hy2-safe telegram-replace [--token-file FILE --chat-id ID]
+  hy2-safe uninstall [--yes]
 
 install/configure 选项：
   --domain DOMAIN            证书/SNI 域名，必须解析到本机
@@ -107,7 +111,23 @@ install/configure 选项：
   - 端口跳跃会让 Hysteria 原生创建并在停止时清理自己的 nftables/iptables 临时规则。
   - ACME 通常还需要放行 TCP 80/443；Hysteria 数据端口需要放行 UDP。
   - Telegram 提醒默认关闭；启用后只向设置时确认的私人 Chat ID 发消息。
+  - 完整卸载会删除 Hy2 配置、证书和 Telegram Token，无法撤销。
 EOF
+}
+
+remove_managed_tree() {
+  local target="$1"
+  case "$target" in
+    /etc/hysteria | /var/lib/hysteria | /var/lib/hy2-safe-notifier | /var/lib/private/hy2-safe-notifier) ;;
+    *) die "拒绝删除不在 hy2-safe 白名单中的目录：$target" ;;
+  esac
+  if [[ -L "$target" ]]; then
+    rm -f -- "$target"
+  elif [[ -d "$target" ]]; then
+    rm -rf -- "$target"
+  elif [[ -e "$target" ]]; then
+    rm -f -- "$target"
+  fi
 }
 
 require_root() {
@@ -518,172 +538,7 @@ validate_masquerade_url() {
   case "$url" in
     *" "* | *$'\t'* | *$'\r'* | *$'\n'* | *"'"* | *'"'* | *\\*) return 1 ;;
   esac
-  [[ "$url" =~ ^https://[A-Za-z0-9] ]] || return 1
-  authority="${url#https://}"
-  authority="${authority%%/*}"
-  [[ "$authority" != *"@"* ]] || return 1
-  host="${authority%%:*}"
-  validate_domain "${host,,}" || return 1
-  if [[ "$authority" == *:* ]]; then
-    port="${authority##*:}"
-    validate_port "$port" || return 1
-  fi
-}
-
-masquerade_host() {
-  local value="${1#https://}"
-  value="${value%%/*}"
-  value="${value%%:*}"
-  printf '%s\n' "${value,,}"
-}
-
-validate_public_masquerade_target() {
-  local host="$1"
-  local address
-  local addresses=()
-  while read -r address _; do
-    [[ -n "$address" ]] && addresses+=("$address")
-  done < <(getent ahosts "$host" | awk '!seen[$1]++ { print $1 }')
-  (("${#addresses[@]}"…9951 tokens truncated…RT_MODE_WAS_SET=1
-        PORT_VALUE_WAS_SET=1
-        shift 2
-        ;;
-      --port-hopping)
-        [[ "$#" -ge 2 ]] || die "--port-hopping 缺少参数。"
-        PORT_MODE="range"
-        HOP_START="${2%-*}"
-        HOP_END="${2#*-}"
-        PORT_MODE_WAS_SET=1
-        PORT_VALUE_WAS_SET=1
-        shift 2
-        ;;
-      --hop-min)
-        [[ "$#" -ge 2 ]] || die "--hop-min 缺少参数。"
-        HOP_MIN_INTERVAL="$2"
-        shift 2
-        ;;
-      --hop-max)
-        [[ "$#" -ge 2 ]] || die "--hop-max 缺少参数。"
-        HOP_MAX_INTERVAL="$2"
-        shift 2
-        ;;
-      --password)
-        [[ "$#" -ge 2 ]] || die "--password 缺少参数。"
-        warn "--password 可能出现在 shell 历史和进程列表中；自动化请优先使用 --password-file。"
-        PASSWORD="$2"
-        shift 2
-        ;;
-      --password-file)
-        [[ "$#" -ge 2 ]] || die "--password-file 缺少参数。"
-        validate_password_file "$2"
-        PASSWORD="$(head -n 1 -- "$2")"
-        shift 2
-        ;;
-      --masquerade-url)
-        [[ "$#" -ge 2 ]] || die "--masquerade-url 缺少参数。"
-        MASQUERADE_MODE="proxy"
-        MASQUERADE_URL="$2"
-        MASQUERADE_WAS_SET=1
-        shift 2
-        ;;
-      --static-masquerade)
-        MASQUERADE_MODE="static"
-        MASQUERADE_URL=""
-        MASQUERADE_WAS_SET=1
-        shift
-        ;;
-      --auto-update)
-        AUTO_UPDATE=1
-        AUTO_UPDATE_WAS_SET=1
-        shift
-        ;;
-      --no-auto-update)
-        AUTO_UPDATE=0
-        AUTO_UPDATE_WAS_SET=1
-        shift
-        ;;
-      --non-interactive)
-        NON_INTERACTIVE=1
-        shift
-        ;;
-      --reinstall)
-        REINSTALL=1
-        shift
-        ;;
-      -h | --help)
-        usage
-        exit 0
-        ;;
-      *) die "未知选项：$1" ;;
-    esac
-  done
-}
-
-show_client() {
-  local server_address official_share compatible_share share_output transport_config firewall_ports
-  require_root
-  load_existing_settings || die "未找到由 hy2-safe 管理的配置。"
-  if [[ "$PORT_MODE" == "range" ]]; then
-    server_address="${DOMAIN}:${HOP_START}-${HOP_END}"
-    official_share="hysteria2://${PASSWORD}@${DOMAIN}:${HOP_START}-${HOP_END}/?sni=${DOMAIN}&insecure=0#hy2-${DOMAIN}"
-    compatible_share="hysteria2://${PASSWORD}@${DOMAIN}:${HOP_START}/?sni=${DOMAIN}&insecure=0&mport=${HOP_START}-${HOP_END}#hy2-${DOMAIN}"
-    share_output="$(cat <<EOF
-Hysteria 2 官方分享链接：
-${official_share}
-
-v2rayN / v2rayNG 兼容分享链接：
-${compatible_share}
-EOF
-)"
-    firewall_ports="${HOP_START}-${HOP_END}"
-    transport_config="$(cat <<EOF
-transport:
-  type: udp
-  udp:
-    minHopInterval: ${HOP_MIN_INTERVAL}s
-    maxHopInterval: ${HOP_MAX_INTERVAL}s
-EOF
-)"
-  else
-    server_address="${DOMAIN}:${PORT}"
-    official_share="hysteria2://${PASSWORD}@${DOMAIN}:${PORT}/?sni=${DOMAIN}&insecure=0#hy2-${DOMAIN}"
-    share_output="$(cat <<EOF
-通用分享链接（官方客户端、v2rayN、v2rayNG）：
-${official_share}
-EOF
-)"
-    firewall_ports="$PORT"
-    transport_config=""
-  fi
-  cat <<EOF
-Hysteria 2 官方客户端完整 YAML（本机 SOCKS5：127.0.0.1:1080）：
-
-server: "${server_address}"
-auth: ${PASSWORD}
-tls:
-  sni: ${DOMAIN}
-congestion:
-  type: bbr
-  bbrProfile: conservative
-fastOpen: true
-${transport_config}
-socks5:
-  listen: 127.0.0.1:1080
-
-${share_output}
-
-需要放行的 UDP 端口：${firewall_ports}
-EOF
-}
-
-command_install() {
-  local install_arg
-  local telegram_answer=""
-  require_root
-  require_systemd
-  require_supported_os
-  REINSTALL=0
-  for install_arg in "$@"; do
+  [[ "$url" =~ ^https://[A…11114 tokens truncated…n "$@"; do
     [[ "$install_arg" == "--reinstall" ]] && REINSTALL=1
   done
   if [[ -f "$SETTINGS_PATH" ]]; then
@@ -944,6 +799,23 @@ command_telegram_setup() {
   printf '规则：新 IP 网段立即提醒；相同网段一小时内合并；每天发送一份汇总。\n'
 }
 
+command_telegram_replace() {
+  require_root
+  load_existing_settings || die "请先安装 Hy2。"
+  [[ "$TELEGRAM_ENABLED" -eq 1 && -f "$NOTIFIER_CONFIG_PATH" ]] ||
+    die "Telegram 提醒尚未启用，请选择“添加 Telegram 通知”。"
+  info "新机器人通过 Token、Chat ID 和测试消息验证后才会替换旧机器人；失败时保留旧配置。"
+  command_telegram_setup "$@"
+}
+
+command_telegram_add() {
+  require_root
+  load_existing_settings || die "请先安装 Hy2。"
+  [[ "$TELEGRAM_ENABLED" -eq 0 ]] ||
+    die "Telegram 提醒已经启用；如需更换 Token，请选择“更换 Telegram 机器人”。"
+  command_telegram_setup "$@"
+}
+
 command_telegram_test() {
   require_root
   load_existing_settings || die "请先安装 Hy2。"
@@ -964,7 +836,11 @@ command_telegram_disable() {
   require_systemd
   load_existing_settings || die "请先安装 Hy2。"
   if [[ "$TELEGRAM_ENABLED" -eq 0 ]]; then
-    info "Telegram 提醒已经处于关闭状态。"
+    systemctl disable --now "$NOTIFIER_NAME" >/dev/null 2>&1 || true
+    rm -f -- "$NOTIFIER_CONFIG_PATH"
+    remove_managed_tree "$NOTIFIER_STATE_DIR"
+    remove_managed_tree "$NOTIFIER_PRIVATE_STATE_DIR"
+    info "Telegram 提醒已经关闭；残留 Token 和通知状态也已清理。"
     return
   fi
 
@@ -995,7 +871,9 @@ command_telegram_disable() {
   fi
   configure_notifier_service
   rm -f -- "$NOTIFIER_CONFIG_PATH"
-  info "Telegram 提醒已关闭，Bot Token 已从服务器配置中删除。"
+  remove_managed_tree "$NOTIFIER_STATE_DIR"
+  remove_managed_tree "$NOTIFIER_PRIVATE_STATE_DIR"
+  info "Telegram 提醒已关闭，Bot Token 和提醒状态已从服务器删除。"
 }
 
 command_update() {
@@ -1050,9 +928,40 @@ command_logs() {
 }
 
 command_uninstall() {
+  local assume_yes=0 answer=""
   require_root
   require_systemd
   [[ -f "$SETTINGS_PATH" ]] || die "未检测到 hy2-safe 管理的安装，拒绝删除未知实例。"
+
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --yes)
+        assume_yes=1
+        shift
+        ;;
+      -h | --help)
+        printf '用法：hy2-safe uninstall [--yes]\n'
+        printf '警告：会永久删除 Hy2 配置、证书、密码和 Telegram Token。\n'
+        return
+        ;;
+      *) die "uninstall 的未知选项：$1" ;;
+    esac
+  done
+
+  printf '即将永久删除：\n'
+  printf '  - Hysteria 2 程序、旧版本、管理脚本和 systemd 服务\n'
+  printf '  - Hy2 服务端配置、客户端密码和 ACME 证书\n'
+  printf '  - Telegram Bot Token、通知程序和通知状态\n'
+  printf '自动安装的通用系统依赖不会删除，以免影响其他程序。\n'
+  if [[ "$assume_yes" -eq 0 ]]; then
+    [[ -t 0 ]] || die "非交互卸载必须明确添加 --yes。"
+    read -r -p "此操作无法撤销；确认完整卸载请输入 DELETE: " answer
+    [[ "$answer" == "DELETE" ]] || {
+      info "已取消卸载，没有删除任何内容。"
+      return
+    }
+  fi
+
   exec 9>"$LOCK_PATH"
   flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
 
@@ -1067,23 +976,78 @@ command_uninstall() {
     "$BIN_PATH" \
     "$PREVIOUS_BIN_PATH" \
     "$NOTIFIER_PATH" \
-    "$MANAGER_PATH"
+    "$MANAGER_PATH" \
+    "$DEFAULT_DOWNLOAD_PATH"
+  remove_managed_tree "$CONFIG_DIR"
+  remove_managed_tree "$STATE_DIR"
+  remove_managed_tree "$NOTIFIER_STATE_DIR"
+  remove_managed_tree "$NOTIFIER_PRIVATE_STATE_DIR"
   systemctl daemon-reload
   systemctl reset-failed \
     "$SERVICE_NAME" \
     hy2-safe-update.service \
     "$NOTIFIER_NAME" >/dev/null 2>&1 || true
 
-  info "程序和 systemd 单元已卸载。"
-  printf '出于防误删考虑，配置、证书和 Telegram 提醒状态仍保留在：\n  %s\n  %s\n  %s\n' \
-    "$CONFIG_DIR" "$STATE_DIR" "$NOTIFIER_STATE_DIR"
+  info "Hy2 程序、配置、证书、密码、Telegram Token 和通知状态已完整删除。"
+  printf '保留了通用系统依赖和 hysteria 低权限系统账号；它们不会影响下次重新安装。\n'
+}
+
+command_menu() {
+  local choice=""
+  require_root
+  printf '\nhy2-safe 一键管理菜单\n'
+  if [[ -f "$SETTINGS_PATH" ]]; then
+    printf '当前状态：已检测到 hy2-safe 安装\n'
+    install_manager_copy
+  else
+    printf '当前状态：尚未安装 Hy2\n'
+  fi
+  cat <<'EOF'
+
+  1) 安装 Hy2
+  2) 完整卸载 Hy2
+  3) 添加 Telegram 通知
+  4) 更换 Telegram 机器人
+  5) 删除 Telegram 通知
+  6) 显示客户端配置
+  7) 修改 Hy2 配置
+  8) 更新 Hysteria 2
+  9) 查看服务状态
+  0) 退出
+EOF
+  read -r -p "请输入选项 [0-9]: " choice
+  case "$choice" in
+    1)
+      if [[ -f "$SETTINGS_PATH" ]]; then
+        die "已经安装 Hy2；如需修改请选择 7，如需修复请运行 hy2-safe install --reinstall。"
+      fi
+      command_install
+      ;;
+    2) command_uninstall ;;
+    3) command_telegram_add ;;
+    4) command_telegram_replace ;;
+    5) command_telegram_disable ;;
+    6) show_client ;;
+    7) command_configure ;;
+    8) command_update ;;
+    9) command_status ;;
+    0) info "已退出。" ;;
+    *) die "无效选项：$choice" ;;
+  esac
 }
 
 main() {
-  local command="${1:-help}"
-  if [[ "$#" -gt 0 ]]; then
-    shift
+  local command
+  if [[ "$#" -eq 0 ]]; then
+    if [[ -t 0 && -t 1 ]]; then
+      command_menu
+    else
+      usage
+    fi
+    return
   fi
+  command="$1"
+  shift
   case "$command" in
     install) command_install "$@" ;;
     configure) command_configure "$@" ;;
@@ -1095,6 +1059,7 @@ main() {
     telegram-test) command_telegram_test "$@" ;;
     telegram-logs) command_telegram_logs "$@" ;;
     telegram-disable) command_telegram_disable "$@" ;;
+    telegram-replace) command_telegram_replace "$@" ;;
     uninstall) command_uninstall "$@" ;;
     help | -h | --help) usage ;;
     *) die "未知命令：$command。请运行 $PROGRAM help。" ;;
