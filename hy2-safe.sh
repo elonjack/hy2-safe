@@ -62,13 +62,13 @@ usage() {
 hy2-safe - 安全、精简的 Hysteria 2 服务端管理器
 
 用法：
-  sudo ./hy2-safe.sh install [选项]
-  sudo hy2-safe configure [选项]
-  sudo hy2-safe update [--quiet]
-  sudo hy2-safe show-client
-  sudo hy2-safe status
-  sudo hy2-safe logs
-  sudo hy2-safe uninstall
+  ./hy2-safe.sh install [选项]
+  hy2-safe configure [选项]
+  hy2-safe update [--quiet]
+  hy2-safe show-client
+  hy2-safe status
+  hy2-safe logs
+  hy2-safe uninstall
 
 install/configure 选项：
   --domain DOMAIN            证书/SNI 域名，必须解析到本机
@@ -87,7 +87,7 @@ install/configure 选项：
   --reinstall                使用已保留的 hy2-safe 配置修复/重装
 
 示例：
-  sudo ./hy2-safe.sh install \
+  ./hy2-safe.sh install \
     --domain hy2.example.com \
     --email admin@example.com \
     --masquerade-url https://www.example.org/
@@ -101,7 +101,7 @@ EOF
 }
 
 require_root() {
-  [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "请使用 root 或 sudo 运行。"
+  [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "请以 root 身份运行（非 root 用户可使用 sudo）。"
 }
 
 require_systemd() {
@@ -538,25 +538,7 @@ prompt_install_values() {
 
   if [[ "$PORT_VALUE_WAS_SET" -eq 0 && "$non_interactive" -eq 0 ]]; then
     if [[ "$PORT_MODE" == "range" ]]; then
-      read -r -p "UDP 跳跃端口…96 tokens truncated…0 ]]; then
-    read -r -p "自定义 HTTPS 伪装站点（留空保留当前模式）: " answer
-    if [[ -n "$answer" ]]; then
-      MASQUERADE_MODE="proxy"
-      MASQUERADE_URL="$answer"
-    fi
-  fi
-
-  if [[ "$AUTO_UPDATE_WAS_SET" -eq 0 && "$non_interactive" -eq 0 ]]; then
-    if [[ "$AUTO_UPDATE" -eq 1 ]]; then
-      read -r -p "开启每周自动更新并在失败时回滚？[Y/n]: " answer
-    else
-      read -r -p "开启每周自动更新并在失败时回滚？[y/N]: " answer
-    fi
-    case "${answer,,}" in
-      y | yes) AUTO_UPDATE=1 ;;
-      n | no) AUTO_UPDATE=0 ;;
-      *) : ;;
-    esac
+      read -r -p "UDP 跳跃端口范围 [${HOP…255 tokens truncated…  esac
   fi
 
   [[ -n "$PASSWORD" ]] || PASSWORD="$(random_password)"
@@ -903,12 +885,21 @@ parse_config_options() {
 }
 
 show_client() {
-  local server_address share_address transport_config firewall_ports
+  local server_address official_share compatible_share share_output transport_config firewall_ports
   require_root
   load_existing_settings || die "未找到由 hy2-safe 管理的配置。"
   if [[ "$PORT_MODE" == "range" ]]; then
     server_address="${DOMAIN}:${HOP_START}-${HOP_END}"
-    share_address="${DOMAIN}:${HOP_START}-${HOP_END}"
+    official_share="hysteria2://${PASSWORD}@${DOMAIN}:${HOP_START}-${HOP_END}/?sni=${DOMAIN}&insecure=0#hy2-${DOMAIN}"
+    compatible_share="hysteria2://${PASSWORD}@${DOMAIN}:${HOP_START}/?sni=${DOMAIN}&insecure=0&mport=${HOP_START}-${HOP_END}#hy2-${DOMAIN}"
+    share_output="$(cat <<EOF
+Hysteria 2 官方分享链接：
+${official_share}
+
+v2rayN / v2rayNG 兼容分享链接：
+${compatible_share}
+EOF
+)"
     firewall_ports="${HOP_START}-${HOP_END}"
     transport_config="$(cat <<EOF
 transport:
@@ -920,12 +911,17 @@ EOF
 )"
   else
     server_address="${DOMAIN}:${PORT}"
-    share_address="${DOMAIN}:${PORT}"
+    official_share="hysteria2://${PASSWORD}@${DOMAIN}:${PORT}/?sni=${DOMAIN}&insecure=0#hy2-${DOMAIN}"
+    share_output="$(cat <<EOF
+通用分享链接（官方客户端、v2rayN、v2rayNG）：
+${official_share}
+EOF
+)"
     firewall_ports="$PORT"
     transport_config=""
   fi
   cat <<EOF
-客户端 YAML：
+Hysteria 2 官方客户端完整 YAML（本机 SOCKS5：127.0.0.1:1080）：
 
 server: "${server_address}"
 auth: ${PASSWORD}
@@ -933,9 +929,10 @@ tls:
   sni: ${DOMAIN}
 fastOpen: true
 ${transport_config}
+socks5:
+  listen: 127.0.0.1:1080
 
-分享链接：
-hysteria2://${PASSWORD}@${share_address}/?sni=${DOMAIN}#hy2-${DOMAIN}
+${share_output}
 
 需要放行的 UDP 端口：${firewall_ports}
 EOF
