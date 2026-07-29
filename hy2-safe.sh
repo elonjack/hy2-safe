@@ -538,16 +538,7 @@ validate_masquerade_url() {
   case "$url" in
     *" "* | *$'\t'* | *$'\r'* | *$'\n'* | *"'"* | *'"'* | *\\*) return 1 ;;
   esac
-  [[ "$url" =~ ^https://[A…11114 tokens truncated…n "$@"; do
-    [[ "$install_arg" == "--reinstall" ]] && REINSTALL=1
-  done
-  if [[ -f "$SETTINGS_PATH" ]]; then
-    [[ "$REINSTALL" -eq 1 ]] ||
-      die "检测到已有或已卸载但保留配置的 hy2-safe 实例。请使用 configure、update 或 install --reinstall。"
-  elif [[ -e "$BIN_PATH" || -e "$CONFIG_PATH" || -e "$SERVICE_PATH" ]]; then
-    die "检测到非 hy2-safe 管理的 Hysteria 文件，拒绝覆盖。请先备份并迁移或卸载旧实例。"
-  elif [[ "$REINSTALL" -eq 1 ]]; then
-    die "没有找到可供重装的 hy2-safe 配置。"
+  [[ "$url" =~ ^https://[A…11256 tokens truncated…到可供重装的 hy2-safe 配置。"
   fi
   install_dependencies
 
@@ -901,15 +892,21 @@ command_update() {
 }
 
 command_status() {
+  local current_version
   require_root
   load_existing_settings || true
-  systemctl --no-pager --full status "$SERVICE_NAME" || true
-  printf '\n已安装版本：%s\n' "$(installed_version || printf '未安装')"
+  current_version="$(installed_version || printf '未安装')"
+  printf '当前 Hysteria 2 版本：%s\n' "$current_version"
+  if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+    printf 'Hy2 服务：正在运行\n'
+  else
+    printf 'Hy2 服务：未运行或异常\n'
+  fi
   if systemctl is-enabled --quiet "$TIMER_NAME" 2>/dev/null; then
-    printf '自动更新：已开启\n'
+    printf '每周自动更新：已开启（下面显示下次检查时间）\n'
     systemctl list-timers --no-pager "$TIMER_NAME" || true
   else
-    printf '自动更新：未开启\n'
+    printf '每周自动更新：未开启\n'
   fi
   if [[ "${TELEGRAM_ENABLED:-0}" -eq 1 ]]; then
     if systemctl is-active --quiet "$NOTIFIER_NAME" 2>/dev/null; then
@@ -920,6 +917,8 @@ command_status() {
   else
     printf 'Telegram 提醒：未开启\n'
   fi
+  printf '\n详细 systemd 状态：\n'
+  systemctl --no-pager --full status "$SERVICE_NAME" || true
 }
 
 command_logs() {
@@ -953,6 +952,7 @@ command_uninstall() {
   printf '  - Hy2 服务端配置、客户端密码和 ACME 证书\n'
   printf '  - Telegram Bot Token、通知程序和通知状态\n'
   printf '自动安装的通用系统依赖不会删除，以免影响其他程序。\n'
+  printf '警告：短时间反复完整卸载重装会反复申请新证书，可能触发证书机构频率限制。\n'
   if [[ "$assume_yes" -eq 0 ]]; then
     [[ -t 0 ]] || die "非交互卸载必须明确添加 --yes。"
     read -r -p "此操作无法撤销；确认完整卸载请输入 DELETE: " answer
@@ -1011,8 +1011,8 @@ command_menu() {
   5) 删除 Telegram 通知
   6) 显示客户端配置
   7) 修改 Hy2 配置
-  8) 更新 Hysteria 2
-  9) 查看服务状态
+  8) 立即检查更新（默认另有每周自动更新）
+  9) 查看版本、服务和自动更新状态
   0) 退出
 EOF
   read -r -p "请输入选项 [0-9]: " choice
