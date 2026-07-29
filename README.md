@@ -27,8 +27,10 @@
 - [伪装页面](#伪装页面)
 - [Telegram 连接提醒](#telegram-连接提醒)
 - [版本和自动更新](#版本和自动更新)
+- [hysteria 服务账号是什么](#hysteria-服务账号是什么)
 - [完整卸载与重新安装](#完整卸载与重新安装)
 - [安全设计](#安全设计)
+- [隐私与敏感信息](#隐私与敏感信息)
 - [文件位置](#文件位置)
 - [常用命令](#常用命令)
 - [常见问题](#常见问题)
@@ -41,9 +43,9 @@
 - 校验 GitHub Release 元数据、文件大小、Asset SHA-256、官方 `hashes.txt` 和二进制报告版本。
 - 使用自己的域名，由 Hysteria ACME 自动申请并续期公开可信证书。
 - 客户端保持证书验证，不设置 `insecure: true`。
-- 默认开启原生 UDP 端口跳跃：`20000-50000`。
+- 默认开启原生 UDP 端口跳跃：`50000-50500`（共 501 个端口）。
 - 不硬编码客户端上传/下载 Mbps，使用较保守的自适应 BBR。
-- Hysteria 使用独立无登录权限账号运行，只在需要端口跳跃时授予 `CAP_NET_ADMIN`。
+- Hysteria 使用独立无登录权限账号运行；每次服务启动前都会检查密码锁定、登录 Shell 和 SSH 密钥入口。
 - 默认使用本机固定小页面作为伪装，不反向代理 Bing 等第三方大站。
 - 每周自动检查 Hysteria 官方稳定版，失败时恢复上一版本。
 - 输出官方客户端 YAML、官方分享链接及 v2rayN/v2rayNG 兼容链接。
@@ -102,7 +104,7 @@ VPS 系统防火墙和云厂商安全组是两层不同的过滤：
 | --- | --- | --- |
 | SSH | TCP | 你的实际 SSH 端口 |
 | ACME 域名验证 | TCP | `80`、`443` |
-| Hy2 端口跳跃 | UDP | `20000-50000` |
+| Hy2 端口跳跃 | UDP | `50000-50500` |
 
 如果没有任何默认拒绝规则，就不存在“先开放端口才能使用”的步骤；程序监听后公网即可访问。但这也意味着以后其他程序如果意外监听公网，不会被防火墙额外拦截。
 
@@ -145,7 +147,7 @@ chmod 0700 /root/hy2-safe.sh
 | 证书/SNI 域名 | 填写灰云子域名，例如 `hy2.example.com` |
 | ACME 通知邮箱 | 填写可以接收邮件的邮箱 |
 | 开启原生端口跳跃 | 直接回车，默认开启 |
-| UDP 跳跃端口范围 | 直接回车，默认 `20000-50000` |
+| UDP 跳跃端口范围 | 直接回车，默认 `50000-50500` |
 | 自定义 HTTPS 伪装站点 | 直接回车，使用本机固定小页面 |
 | 每周自动更新 | 直接回车，默认开启 |
 | Telegram 提醒 | 需要时输入 `y`，暂时不需要直接回车 |
@@ -169,7 +171,7 @@ hy2-safe
 菜单如下：
 
 ```text
-hy2-safe v1.0.0 一键管理菜单
+hy2-safe v1.0.1 一键管理菜单
 
   1) 安装 Hy2
   2) 完整卸载 Hy2
@@ -212,8 +214,8 @@ hy2-safe show-client
 输出大致如下，实际内容以你的服务器为准：
 
 ```yaml
-server: "hy2.example.com:20000-50000"
-auth: 脚本生成的随机密码
+server: "hy2.example.com:50000-50500"
+auth: "脚本生成的随机密码"
 tls:
   sni: hy2.example.com
 congestion:
@@ -262,12 +264,12 @@ Hysteria 官方 URI 规范也说明，带宽属于客户端本地参数，不应
 默认范围：
 
 ```text
-UDP 20000-50000
+UDP 50000-50500
 ```
 
-这不代表同时建立三万个连接，也不代表同时向三万个端口发送数据。客户端会随机选择一个端口，并在 `15-45` 秒之间随机更换；服务端把范围内端口重定向到实际监听端口。
+这不代表同时建立 501 个连接，也不代表同时向 501 个端口发送数据。客户端只会随机选择其中一个端口，并在 `15-45` 秒之间随机更换；服务端把范围内端口重定向到实际监听端口。
 
-端口跳跃可以缓解部分只针对单一 UDP 端口的限速或封锁，但不能绕过所有网络限制。
+501 个候选端口对个人节点已经足够，也比开放三万个端口更容易设置防火墙，并减少与其他 UDP 服务发生端口冲突的范围。端口数量本身不会提高速度；端口跳跃只能缓解部分针对单一 UDP 端口的限速或封锁，不能绕过所有网络限制。
 
 修改范围：
 
@@ -426,7 +428,30 @@ hy2-safe-update.timer
 菜单 `8) 立即检查更新` 只是马上手动检查一次，不会关闭每周自动更新。
 
 > [!NOTE]
-> 自动更新只更新 Hysteria 官方核心，不会远程替换 `hy2-safe` 管理脚本。重新执行 README 的一行下载命令并打开菜单，会把最新管理脚本同步到 `/usr/local/sbin/hy2-safe`。
+> 自动更新只更新 Hysteria 官方核心，不会远程替换 `hy2-safe` 管理脚本。重新执行 README 的一行下载命令并打开菜单，执行普通管理操作时会同步最新管理脚本、服务账号权限和 systemd 单元；刷新本身不会主动重启正在运行的 Hy2。若恰好同时触发 Hysteria 核心更新，更新流程仍会按设计重启并检查服务。选择“完整卸载”时不会先做刷新。
+
+## hysteria 服务账号是什么
+
+安装时会看到一个名为 `hysteria` 的 Linux 系统账号。它不是 Hy2 客户端账号，也不是你的 VPS 登录账号：
+
+| 名称 | 用途 |
+| --- | --- |
+| `root` | 你通过 SSH 管理 VPS 使用的管理员账号 |
+| Linux 用户 `hysteria` | 只负责以低权限运行 Hysteria 服务端程序 |
+| Hy2 随机密码 | v2rayN、v2rayNG 或官方客户端连接节点时使用 |
+
+让服务使用独立低权限账号，是为了即使 Hysteria 程序将来出现漏洞，也尽量缩小它能读写的系统范围。脚本会进行这些限制：
+
+- 登录 Shell 是 `/usr/sbin/nologin`、`/sbin/nologin` 或 `/bin/false`。
+- 创建账号后立即锁定密码，密码状态必须是 `L`。
+- 家目录 `/var/lib/hysteria` 由 `root` 控制，`hysteria` 用户不能在里面自行创建 `.ssh/authorized_keys`。
+- 只有证书目录 `/var/lib/hysteria/acme` 允许 `hysteria` 写入。
+- 每次 systemd 启动 Hy2 前，都会重新检查账号、组、密码锁定状态、`.ssh` 入口和目录权限；检查失败就不启动服务。
+
+因此，创建这个账号不会给 Telegram 发送“客户端连接”消息。Telegram 只提醒通过 Hy2 密码认证成功的网络客户端，不会把 Linux 本地账号创建当成节点连接。
+
+> [!IMPORTANT]
+> 这些检查不修改你的 SSH 配置，也不影响 `root` 登录。若管理员以后手工给 `hysteria` 设置密码、改成可登录 Shell、加入其他组或创建 `.ssh`，Hy2 会拒绝启动并要求先恢复安全状态。
 
 ## 完整卸载与重新安装
 
@@ -450,8 +475,17 @@ hy2-safe
 - Hy2 服务端配置、密码和客户端信息。
 - ACME 证书和账户状态。
 - Telegram Bot Token 和通知状态。
+- 有 root-only 归属记录证明由本脚本创建的 `hysteria` 服务用户和组。
 
-脚本不会自动卸载 `curl`、`python3` 等通用依赖，也会保留无登录权限的 `hysteria` 系统账号，避免误伤其他程序。这些内容不会阻止下次安装。
+脚本不会自动卸载 `curl`、`python3` 等通用依赖。新安装时，脚本会把自己创建的服务用户 UID 和服务组 GID 记录在：
+
+```text
+/etc/hysteria/hy2-safe-account.env
+```
+
+该文件只允许 `root` 读取。完整卸载只有在“创建标记、UID/GID 和当前账号”三者一致时才删除 `hysteria` 用户和组；不会删除或修改 `root`。
+
+如果是从没有归属记录的旧版本升级，或者同名账号本来就已存在，脚本不能百分之百证明账号由自己创建，因此会保留账号并在卸载结果中明确说明。这种情况下只删除 Hy2 的 ACME 子目录，家目录仅在已经为空时删除，不递归删除来源不明的其他内容。这样可避免误伤其他程序正在使用的 Linux 身份，不影响以后重新安装。
 
 重新安装时，再次执行 README 的一行命令即可。Hysteria 会重新验证域名并申请新证书。
 
@@ -468,13 +502,17 @@ hy2-safe
 - 限制元数据、哈希文件和二进制最大体积。
 - 同时验证 GitHub Asset digest 和官方 `hashes.txt`。
 - 验证二进制自身报告版本。
+- 拒绝低于 `v2.8.0`、不支持当前原生端口范围和 BBR profile 的旧核心。
 - 不自动降级。
 - 更新失败自动尝试回滚。
 
 ### 权限
 
 - Hysteria 使用独立 `hysteria` 无登录账号。
-- 脚本拒绝复用具有登录 Shell、错误家目录、额外组权限或共享成员的同名账号/组。
+- 脚本明确锁定该账号密码，并在每次服务启动前要求密码状态为 `L`。
+- 脚本拒绝复用具有登录 Shell、错误家目录、`.ssh`、额外组权限或共享成员的同名账号/组。
+- 账号家目录由 `root` 控制，只有 ACME 证书子目录允许服务写入。
+- root-only 归属文件记录脚本创建的用户 UID 和组 GID，卸载时必须匹配才会删除。
 - 单端口只授予 `CAP_NET_BIND_SERVICE`。
 - 端口跳跃额外授予必需的 `CAP_NET_ADMIN` 和 `AF_NETLINK`。
 - systemd 启用文件系统、设备、内核、`/proc` 和可写执行内存限制。
@@ -496,6 +534,23 @@ hy2-safe
 - 不保证绕过所有 QoS 或封锁。
 - 不自动更新 `hy2-safe` 自身。
 
+## 隐私与敏感信息
+
+公开仓库中的脚本和 README 不包含你的真实域名、VPS IP、邮箱、Hy2 密码、证书私钥、Telegram Bot Token 或 Chat ID。安装时填写或生成的内容保存在你自己的 VPS 上，不会上传到本项目的 GitHub 仓库。
+
+以下内容本来就需要交给对应服务才能工作：
+
+- 域名和 ACME 邮箱会交给证书机构申请公开可信证书。
+- 启用 Telegram 后，Bot Token、固定 Chat ID、已隐藏部分地址的客户端 IP 和提醒时间会通过 Telegram Bot API 处理。
+- 下载和自动更新会访问 Hysteria 官方 GitHub Release。
+
+需要自己注意：
+
+- `hy2-safe show-client` 会在当前 SSH 终端显示完整 Hy2 密码和分享链接。脚本会先警告；不要截图、录屏或发送到群聊。
+- Hysteria 的 systemd 日志会保留客户端完整来源 IP；Telegram 消息只发送隐藏后的 IPv4 `/24` 或 IPv6 `/48`。
+- Telegram Token 通过不回显输入或 root-only 文件读取，不接受命令行明文参数。
+- Hy2 自定义密码同样不接受命令行明文，只能使用 root-only `--password-file`；不指定时自动生成。
+
 ## 文件位置
 
 | 路径 | 用途 |
@@ -505,6 +560,7 @@ hy2-safe
 | `/usr/local/sbin/hy2-safe` | 管理脚本 |
 | `/etc/hysteria/config.yaml` | Hysteria 服务端配置 |
 | `/etc/hysteria/hy2-safe.env` | root-only 管理设置 |
+| `/etc/hysteria/hy2-safe-account.env` | root-only 服务账号创建归属与 UID/GID 记录 |
 | `/etc/hysteria/telegram-notifier.json` | root-only Telegram 凭据 |
 | `/var/lib/hysteria/acme` | ACME 证书和账户状态 |
 | `/usr/local/libexec/hy2-safe-notifier.py` | Telegram 提醒程序 |
@@ -562,7 +618,7 @@ hy2-safe uninstall
 /root/hy2-safe.sh install \
   --domain hy2.example.com \
   --email admin@example.com \
-  --port-hopping 20000-50000 \
+  --port-hopping 50000-50500 \
   --static-masquerade \
   --auto-update \
   --non-interactive
@@ -660,6 +716,12 @@ chmod 0600 /root/hy2-new-password
 hy2-safe configure --password-file /root/hy2-new-password --non-interactive
 rm -f /root/hy2-new-password
 ```
+
+### hysteria 账号能不能 SSH 登录
+
+正常情况下不能。它的密码被锁定、登录 Shell 为 `nologin`，家目录也不允许它创建 `.ssh/authorized_keys`。每次启动 Hy2 前会再次检查，任一条件不符合都会阻止服务启动。
+
+你仍然使用 `root` 管理 VPS。`hysteria` 只是 Hysteria 程序的低权限运行身份，不需要也不应该拿它登录。
 
 ### 没开防火墙是否一定不安全
 

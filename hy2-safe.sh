@@ -15,7 +15,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.0.0"
+readonly PROGRAM_VERSION="1.0.1"
 readonly REPOSITORY="apernet/hysteria"
 readonly API_URL="https://api.github.com/repos/${REPOSITORY}/releases/latest"
 readonly RELEASE_URL="https://github.com/${REPOSITORY}/releases/download"
@@ -26,6 +26,7 @@ readonly DEFAULT_DOWNLOAD_PATH="/root/hy2-safe.sh"
 readonly CONFIG_DIR="/etc/hysteria"
 readonly CONFIG_PATH="${CONFIG_DIR}/config.yaml"
 readonly SETTINGS_PATH="${CONFIG_DIR}/hy2-safe.env"
+readonly ACCOUNT_OWNERSHIP_PATH="${CONFIG_DIR}/hy2-safe-account.env"
 readonly STATE_DIR="/var/lib/hysteria"
 readonly SERVICE_PATH="/etc/systemd/system/hysteria-server.service"
 readonly UPDATE_SERVICE_PATH="/etc/systemd/system/hy2-safe-update.service"
@@ -42,6 +43,10 @@ readonly LOCK_PATH="/run/lock/hy2-safe.lock"
 
 QUIET=0
 TMP_ROOT=""
+SERVICE_USER_CREATED=0
+SERVICE_GROUP_CREATED=0
+SERVICE_USER_UID=""
+SERVICE_GROUP_GID=""
 
 info() {
   if [[ "$QUIET" -eq 0 ]]; then
@@ -88,11 +93,10 @@ install/configure 选项：
   --domain DOMAIN            证书/SNI 域名，必须解析到本机
   --email EMAIL              ACME 证书通知邮箱
   --port PORT                使用单 UDP 端口（关闭端口跳跃）
-  --port-hopping START-END   使用原生端口跳跃范围，默认 20000-50000
+  --port-hopping START-END   使用原生端口跳跃范围，默认 50000-50500
   --hop-min SECONDS          随机跳跃最短间隔，默认 15 秒
   --hop-max SECONDS          随机跳跃最长间隔，默认 45 秒
-  --password PASSWORD        16-128 位 base64url 字符；默认安全随机生成
-  --password-file FILE       从仅管理员可读的文件读取密码（自动化时推荐）
+  --password-file FILE       从仅管理员可读的文件读取密码；默认安全随机生成
   --masquerade-url URL       自定义 HTTPS 伪装站点
   --static-masquerade        使用本机静态伪装页（默认）
   --auto-update              开启每周自动更新（默认）
@@ -119,7 +123,7 @@ EOF
 remove_managed_tree() {
   local target="$1"
   case "$target" in
-    /etc/hysteria | /var/lib/hysteria | /var/lib/hy2-safe-notifier | /var/lib/private/hy2-safe-notifier) ;;
+    /etc/hysteria | /var/lib/hysteria | /var/lib/hysteria/acme | /var/lib/hy2-safe-notifier | /var/lib/private/hy2-safe-notifier) ;;
     *) die "拒绝删除不在 hy2-safe 白名单中的目录：$target" ;;
   esac
   if [[ -L "$target" ]]; then
@@ -157,8 +161,8 @@ install_dependencies() {
   local missing=()
   local command_name
   for command_name in \
-    awk curl flock getent groupadd head id install openssl python3 readlink sed sha256sum \
-    stat timeout tr uname useradd; do
+    awk curl flock getent groupadd groupdel head id install openssl passwd python3 readlink sed \
+    sha256sum stat timeout tr uname useradd userdel; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
       missing+=("$command_name")
     fi
@@ -172,8 +176,8 @@ install_dependencies() {
     --no-install-recommends ca-certificates coreutils curl mawk openssl passwd python3 sed util-linux
 
   for command_name in \
-    awk curl flock getent groupadd head id install openssl python3 readlink sed sha256sum \
-    stat timeout tr uname useradd; do
+    awk curl flock getent groupadd groupdel head id install openssl passwd python3 readlink sed \
+    sha256sum stat timeout tr uname useradd userdel; do
     command -v "$command_name" >/dev/null 2>&1 || die "依赖安装后仍未找到：$command_name"
   done
 }
@@ -230,6 +234,7 @@ latest_version() {
   local metadata="$1"
   local version
   curl_secure \
+    --max-filesize 1048576 \
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     "$API_URL" \
@@ -284,12 +289,16 @@ PY
 fetch_verified_release() {
   local architecture asset version metadata
   local asset_url hashes_url asset_api_digest hashes_api_digest
-  local asset_size hashes_size expected actual hashes_actual reported_version
+  local asset_size hashes_size expected actual hashes_actual reported_version minimum_relation
   architecture="$(detect_architecture)"
   asset="hysteria-linux-${architecture}"
   TMP_ROOT="$(mktemp -d /tmp/hy2-safe.XXXXXXXX)"
   metadata="${TMP_ROOT}/release.json"
   version="$(latest_version "$metadata")"
+  minimum_relation="$(compare_versions "$version" "v2.8.0")" ||
+    die "无法验证 Hysteria 最低兼容版本。"
+  [[ "$minimum_relation" -ge 0 ]] ||
+    die "Hysteria ${version} 低于本脚本所需的最低版本 v2.8.0，拒绝安装。"
   asset_url="$(release_asset_field "$metadata" "$asset" browser_download_url)" ||
     die "官方 Release 中未找到唯一的 ${asset}。"
   hashes_url="$(release_asset_field "$metadata" hashes.txt browser_download_url)" ||
@@ -710,8 +719,8 @@ load_existing_settings() {
   # shellcheck disable=SC1090
   source "$SETTINGS_PATH"
   PORT_MODE="${PORT_MODE:-single}"
-  HOP_START="${HOP_START:-20000}"
-  HOP_END="${HOP_END:-50000}"
+  HOP_START="${HOP_START:-50000}"
+  HOP_END="${HOP_END:-50500}"
   HOP_MIN_INTERVAL="${HOP_MIN_INTERVAL:-15}"
   HOP_MAX_INTERVAL="${HOP_MAX_INTERVAL:-45}"
   TELEGRAM_ENABLED="${TELEGRAM_ENABLED:-0}"
@@ -746,42 +755,119 @@ save_settings() {
   mv -f -- "$tmp" "$SETTINGS_PATH"
 }
 
-ensure_service_user_and_directories() {
-  local nologin_shell passwd_entry primary_group account_home account_shell
+load_account_ownership() {
+  local line=""
+  local seen_format=0 seen_user=0 seen_group=0 seen_uid=0 seen_gid=0
+  SERVICE_USER_CREATED=0
+  SERVICE_GROUP_CREATED=0
+  SERVICE_USER_UID=""
+  SERVICE_GROUP_GID=""
+  [[ -e "$ACCOUNT_OWNERSHIP_PATH" || -L "$ACCOUNT_OWNERSHIP_PATH" ]] || return 1
+  validate_root_secret_file "$ACCOUNT_OWNERSHIP_PATH" "服务账号归属记录"
+  [[ "$(stat -c '%g' -- "$ACCOUNT_OWNERSHIP_PATH")" == "0" ]] ||
+    die "服务账号归属记录必须由 root 组拥有：$ACCOUNT_OWNERSHIP_PATH"
+  [[ "$(stat -c '%a' -- "$ACCOUNT_OWNERSHIP_PATH")" == "600" ]] ||
+    die "服务账号归属记录权限必须严格为 0600：$ACCOUNT_OWNERSHIP_PATH"
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      FORMAT_VERSION=1)
+        ((seen_format == 0)) || die "服务账号归属记录包含重复的 FORMAT_VERSION。"
+        seen_format=1
+        ;;
+      SERVICE_USER_CREATED=0 | SERVICE_USER_CREATED=1)
+        ((seen_user == 0)) || die "服务账号归属记录包含重复的 SERVICE_USER_CREATED。"
+        SERVICE_USER_CREATED="${line#*=}"
+        seen_user=1
+        ;;
+      SERVICE_GROUP_CREATED=0 | SERVICE_GROUP_CREATED=1)
+        ((seen_group == 0)) || die "服务账号归属记录包含重复的 SERVICE_GROUP_CREATED。"
+        SERVICE_GROUP_CREATED="${line#*=}"
+        seen_group=1
+        ;;
+      SERVICE_USER_UID=- | SERVICE_USER_UID=[0-9]*)
+        ((seen_uid == 0)) || die "服务账号归属记录包含重复的 SERVICE_USER_UID。"
+        SERVICE_USER_UID="${line#*=}"
+        [[ "$SERVICE_USER_UID" == "-" || "$SERVICE_USER_UID" =~ ^[0-9]+$ ]] ||
+          die "服务账号归属记录中的 UID 无效。"
+        seen_uid=1
+        ;;
+      SERVICE_GROUP_GID=- | SERVICE_GROUP_GID=[0-9]*)
+        ((seen_gid == 0)) || die "服务账号归属记录包含重复的 SERVICE_GROUP_GID。"
+        SERVICE_GROUP_GID="${line#*=}"
+        [[ "$SERVICE_GROUP_GID" == "-" || "$SERVICE_GROUP_GID" =~ ^[0-9]+$ ]] ||
+          die "服务账号归属记录中的 GID 无效。"
+        seen_gid=1
+        ;;
+      *) die "服务账号归属记录包含未知或格式错误的内容，拒绝使用。" ;;
+    esac
+  done <"$ACCOUNT_OWNERSHIP_PATH"
+
+  ((seen_format == 1 && seen_user == 1 && seen_group == 1 &&
+    seen_uid == 1 && seen_gid == 1)) ||
+    die "服务账号归属记录缺少必需字段。"
+  if [[ "$SERVICE_USER_CREATED" -eq 1 ]]; then
+    [[ "$SERVICE_USER_UID" =~ ^[0-9]+$ ]] ||
+      die "服务账号归属记录声明创建了用户，但没有记录有效 UID。"
+  else
+    [[ "$SERVICE_USER_UID" == "-" ]] ||
+      die "服务账号归属记录没有创建用户，却记录了 UID。"
+  fi
+  if [[ "$SERVICE_GROUP_CREATED" -eq 1 ]]; then
+    [[ "$SERVICE_GROUP_GID" =~ ^[0-9]+$ ]] ||
+      die "服务账号归属记录声明创建了组，但没有记录有效 GID。"
+  else
+    [[ "$SERVICE_GROUP_GID" == "-" ]] ||
+      die "服务账号归属记录没有创建组，却记录了 GID。"
+  fi
+}
+
+save_account_ownership() {
+  local tmp user_uid="-" group_gid="-"
+  [[ ! -L "$CONFIG_DIR" ]] || die "配置目录不能是符号链接：$CONFIG_DIR"
+  install -d -m 0750 -o root -g hysteria "$CONFIG_DIR"
+  if [[ "$SERVICE_USER_CREATED" -eq 1 ]]; then
+    user_uid="$(id -u hysteria)"
+  fi
+  if [[ "$SERVICE_GROUP_CREATED" -eq 1 ]]; then
+    group_gid="$(getent group hysteria | awk -F: '{print $3}')"
+  fi
+  [[ "$user_uid" == "-" || "$user_uid" =~ ^[0-9]+$ ]] ||
+    die "无法记录 hysteria 服务用户 UID。"
+  [[ "$group_gid" == "-" || "$group_gid" =~ ^[0-9]+$ ]] ||
+    die "无法记录 hysteria 服务组 GID。"
+
+  tmp="$(mktemp "${CONFIG_DIR}/.hy2-safe-account.env.XXXXXX")"
+  {
+    printf 'FORMAT_VERSION=1\n'
+    printf 'SERVICE_USER_CREATED=%s\n' "$SERVICE_USER_CREATED"
+    printf 'SERVICE_GROUP_CREATED=%s\n' "$SERVICE_GROUP_CREATED"
+    printf 'SERVICE_USER_UID=%s\n' "$user_uid"
+    printf 'SERVICE_GROUP_GID=%s\n' "$group_gid"
+  } >"$tmp"
+  chown root:root "$tmp"
+  chmod 0600 "$tmp"
+  mv -f -- "$tmp" "$ACCOUNT_OWNERSHIP_PATH"
+  SERVICE_USER_UID="$user_uid"
+  SERVICE_GROUP_GID="$group_gid"
+}
+
+validate_recorded_service_identity() {
+  if [[ "$SERVICE_USER_CREATED" -eq 1 ]] && getent passwd hysteria >/dev/null 2>&1; then
+    [[ "$(id -u hysteria)" == "$SERVICE_USER_UID" ]] ||
+      die "hysteria 用户的 UID 与 hy2-safe 创建记录不一致，拒绝继续。"
+  fi
+  if [[ "$SERVICE_GROUP_CREATED" -eq 1 ]] && getent group hysteria >/dev/null 2>&1; then
+    [[ "$(getent group hysteria | awk -F: '{print $3}')" == "$SERVICE_GROUP_GID" ]] ||
+      die "hysteria 组的 GID 与 hy2-safe 创建记录不一致，拒绝继续。"
+  fi
+}
+
+validate_service_group() {
   local group_entry group_gid group_members member
   local -a extra_group_members=()
-  if ! getent group hysteria >/dev/null 2>&1; then
-    groupadd --system hysteria
-  fi
-  if ! getent passwd hysteria >/dev/null 2>&1; then
-    nologin_shell="$(command -v nologin || true)"
-    [[ -n "$nologin_shell" ]] || nologin_shell="/bin/false"
-    useradd \
-      --system \
-      --gid hysteria \
-      --home-dir "$STATE_DIR" \
-      --shell "$nologin_shell" \
-      hysteria
-  fi
-
-  passwd_entry="$(getent passwd hysteria)"
-  account_home="$(awk -F: '{print $6}' <<<"$passwd_entry")"
-  account_shell="$(awk -F: '{print $7}' <<<"$passwd_entry")"
-  primary_group="$(id -gn hysteria)"
-  [[ "$primary_group" == "hysteria" ]] ||
-    die "现有 hysteria 用户的主组不是 hysteria，拒绝复用。"
-  [[ "$account_home" == "$STATE_DIR" ]] ||
-    die "现有 hysteria 用户的家目录不是 ${STATE_DIR}，拒绝复用。"
-  case "$account_shell" in
-    /usr/sbin/nologin | /sbin/nologin | /bin/false) ;;
-    *) die "现有 hysteria 用户具有可登录 Shell，拒绝复用。" ;;
-  esac
-
-  while read -r member; do
-    [[ -z "$member" || "$member" == "hysteria" ]] ||
-      die "现有 hysteria 用户还属于其他组（${member}），拒绝以该账号运行服务。"
-  done < <(id -nG hysteria | tr ' ' '\n')
-
+  getent group hysteria >/dev/null 2>&1 ||
+    die "缺少 hysteria 服务组。"
   group_entry="$(getent group hysteria)"
   group_gid="$(awk -F: '{print $3}' <<<"$group_entry")"
   group_members="$(awk -F: '{print $4}' <<<"$group_entry")"
@@ -796,11 +882,98 @@ ensure_service_user_and_directories() {
         die "hysteria 组包含额外成员（${member}），配置密码可能被读取，拒绝继续。"
     done
   fi
+}
 
+validate_service_account() {
+  local require_directories="${1:-1}"
+  local passwd_entry primary_group account_home account_shell password_status member
+  local service_uid service_gid
+  getent passwd hysteria >/dev/null 2>&1 ||
+    die "缺少 hysteria 服务用户。"
+  passwd_entry="$(getent passwd hysteria)"
+  account_home="$(awk -F: '{print $6}' <<<"$passwd_entry")"
+  account_shell="$(awk -F: '{print $7}' <<<"$passwd_entry")"
+  primary_group="$(id -gn hysteria)"
+  [[ "$primary_group" == "hysteria" ]] ||
+    die "现有 hysteria 用户的主组不是 hysteria，拒绝复用。"
+  [[ "$account_home" == "$STATE_DIR" ]] ||
+    die "现有 hysteria 用户的家目录不是 ${STATE_DIR}，拒绝复用。"
+  case "$account_shell" in
+    /usr/sbin/nologin | /sbin/nologin | /bin/false) ;;
+    *) die "现有 hysteria 用户具有可登录 Shell，拒绝复用。" ;;
+  esac
+  password_status="$(passwd --status hysteria 2>/dev/null)" ||
+    die "无法读取 hysteria 用户的密码锁定状态。"
+  [[ "$(awk '{print $2}' <<<"$password_status")" == "L" ]] ||
+    die "hysteria 用户的密码未锁定（状态必须为 L），拒绝启动服务。"
+  [[ ! -e "${account_home}/.ssh" && ! -L "${account_home}/.ssh" ]] ||
+    die "hysteria 服务账号家目录中存在 .ssh/authorized_keys 入口，拒绝启动服务。"
+
+  while read -r member; do
+    [[ -z "$member" || "$member" == "hysteria" ]] ||
+      die "现有 hysteria 用户还属于其他组（${member}），拒绝以该账号运行服务。"
+  done < <(id -nG hysteria | tr ' ' '\n')
+
+  validate_service_group
+  validate_recorded_service_identity
+
+  if [[ "$require_directories" -eq 1 ]]; then
+    service_uid="$(id -u hysteria)"
+    service_gid="$(getent group hysteria | awk -F: '{print $3}')"
+    [[ -d "$STATE_DIR" && ! -L "$STATE_DIR" ]] ||
+      die "hysteria 家目录必须是非符号链接的真实目录。"
+    [[ "$(stat -c '%u:%g:%a' -- "$STATE_DIR")" == "0:${service_gid}:750" ]] ||
+      die "hysteria 家目录必须是 root:hysteria 0750，防止服务账号创建 SSH 密钥入口。"
+    [[ -d "${STATE_DIR}/acme" && ! -L "${STATE_DIR}/acme" ]] ||
+      die "ACME 状态目录必须是非符号链接的真实目录。"
+    [[ "$(stat -c '%u:%g:%a' -- "${STATE_DIR}/acme")" == "${service_uid}:${service_gid}:750" ]] ||
+      die "ACME 状态目录必须是 hysteria:hysteria 0750。"
+  fi
+}
+
+ensure_service_user_and_directories() {
+  local nologin_shell
+  load_account_ownership || true
+  validate_recorded_service_identity
+
+  if ! getent group hysteria >/dev/null 2>&1; then
+    [[ "$SERVICE_GROUP_CREATED" -eq 0 ]] ||
+      die "hy2-safe 记录的 hysteria 服务组已消失，拒绝自动猜测并重建。"
+    getent passwd hysteria >/dev/null 2>&1 &&
+      die "存在 hysteria 用户但缺少同名服务组，拒绝修复未知账号。"
+    groupadd --system hysteria
+    SERVICE_GROUP_CREATED=1
+    save_account_ownership
+  fi
+  if ! getent passwd hysteria >/dev/null 2>&1; then
+    [[ "$SERVICE_USER_CREATED" -eq 0 ]] ||
+      die "hy2-safe 记录的 hysteria 服务用户已消失，拒绝自动猜测并重建。"
+    nologin_shell="$(command -v nologin || true)"
+    [[ -n "$nologin_shell" ]] || nologin_shell="/bin/false"
+    useradd \
+      --system \
+      --gid hysteria \
+      --home-dir "$STATE_DIR" \
+      --no-create-home \
+      --shell "$nologin_shell" \
+      hysteria
+    if ! passwd --lock hysteria >/dev/null; then
+      userdel hysteria >/dev/null 2>&1 || true
+      die "无法锁定 hysteria 服务用户密码；已尝试撤销账号创建。"
+    fi
+    SERVICE_USER_CREATED=1
+    save_account_ownership
+  fi
+
+  validate_service_account 0
+  [[ ! -L "$CONFIG_DIR" ]] || die "配置目录不能是符号链接：$CONFIG_DIR"
+  [[ ! -L "$STATE_DIR" ]] || die "服务状态目录不能是符号链接：$STATE_DIR"
+  [[ ! -L "${STATE_DIR}/acme" ]] || die "ACME 状态目录不能是符号链接。"
   install -d -m 0750 -o root -g hysteria "$CONFIG_DIR"
-  install -d -m 0750 -o hysteria -g hysteria "$STATE_DIR"
+  install -d -m 0750 -o root -g hysteria "$STATE_DIR"
   install -d -m 0750 -o hysteria -g hysteria "${STATE_DIR}/acme"
   install -d -m 0755 -o root -g root /usr/local/bin /usr/local/sbin /usr/local/libexec
+  validate_service_account 1
 }
 
 write_config() {
@@ -1416,6 +1589,7 @@ Type=simple
 User=hysteria
 Group=hysteria
 WorkingDirectory=${STATE_DIR}
+ExecStartPre=+${MANAGER_PATH} verify-service-account
 ExecStart=${BIN_PATH} server --config ${CONFIG_PATH}
 Restart=on-failure
 RestartSec=5s
@@ -1508,6 +1682,20 @@ configure_update_timer() {
   else
     systemctl disable --now "$TIMER_NAME" >/dev/null 2>&1 || true
   fi
+}
+
+refresh_managed_runtime() {
+  require_systemd
+  install_dependencies
+  load_existing_settings || die "请先安装 Hy2。"
+  exec 8>"$LOCK_PATH"
+  flock -n 8 || die "另一个 hy2-safe 任务正在运行。"
+  ensure_service_user_and_directories
+  install_manager_copy
+  write_systemd_units
+  flock -u 8
+  configure_update_timer
+  info "管理脚本、服务账号权限和 systemd 单元已同步到当前版本。"
 }
 
 discover_telegram_chats() {
@@ -1781,12 +1969,6 @@ parse_config_options() {
         HOP_MAX_INTERVAL="$2"
         shift 2
         ;;
-      --password)
-        [[ "$#" -ge 2 ]] || die "--password 缺少参数。"
-        warn "--password 可能出现在 shell 历史和进程列表中；自动化请优先使用 --password-file。"
-        PASSWORD="$2"
-        shift 2
-        ;;
       --password-file)
         [[ "$#" -ge 2 ]] || die "--password-file 缺少参数。"
         validate_password_file "$2"
@@ -1837,6 +2019,7 @@ show_client() {
   local server_address official_share compatible_share share_output transport_config firewall_ports
   require_root
   load_existing_settings || die "未找到由 hy2-safe 管理的配置。"
+  warn "下面会显示完整 Hy2 密码和分享链接；不要截图、录屏或发送到群聊/公开仓库。"
   if [[ "$PORT_MODE" == "range" ]]; then
     server_address="${DOMAIN}:${HOP_START}-${HOP_END}"
     official_share="hysteria2://${PASSWORD}@${DOMAIN}:${HOP_START}-${HOP_END}/?sni=${DOMAIN}&insecure=0#hy2-${DOMAIN}"
@@ -1873,7 +2056,7 @@ EOF
 Hysteria 2 官方客户端完整 YAML（本机 SOCKS5：127.0.0.1:1080）：
 
 server: "${server_address}"
-auth: ${PASSWORD}
+auth: "${PASSWORD}"
 tls:
   sni: ${DOMAIN}
 congestion:
@@ -1916,8 +2099,8 @@ command_install() {
     EMAIL=""
     PORT="443"
     PORT_MODE="range"
-    HOP_START="20000"
-    HOP_END="50000"
+    HOP_START="50000"
+    HOP_END="50500"
     HOP_MIN_INTERVAL="15"
     HOP_MAX_INTERVAL="45"
     PASSWORD=""
@@ -2243,6 +2426,7 @@ command_update() {
   require_systemd
   [[ -f "$SETTINGS_PATH" ]] || die "未检测到 hy2-safe 管理的安装，拒绝更新未知实例。"
   validate_root_secret_file "$SETTINGS_PATH" "hy2-safe 设置文件"
+  command_verify_service_account
   install_manager_copy
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -2262,6 +2446,13 @@ command_update() {
   flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
   fetch_verified_release
   install_fetched_binary 1
+}
+
+command_verify_service_account() {
+  require_root
+  load_account_ownership || true
+  validate_recorded_service_identity
+  validate_service_account
 }
 
 command_version() {
@@ -2305,12 +2496,32 @@ command_logs() {
   journalctl --no-pager -e -u "$SERVICE_NAME"
 }
 
+service_user_has_processes() {
+  local expected_uid="$1"
+  local status_path real_uid
+  for status_path in /proc/[0-9]*/status; do
+    [[ -r "$status_path" ]] || continue
+    real_uid="$(awk '$1 == "Uid:" { print $2; exit }' "$status_path" 2>/dev/null || true)"
+    [[ "$real_uid" == "$expected_uid" ]] && return 0
+  done
+  return 1
+}
+
 command_uninstall() {
-  local assume_yes=0 answer=""
+  local assume_yes=0 answer="" managed_install=0 ownership_recorded=0 service_uid=""
   require_root
   require_systemd
-  [[ -f "$SETTINGS_PATH" ]] || die "未检测到 hy2-safe 管理的安装，拒绝删除未知实例。"
-  validate_root_secret_file "$SETTINGS_PATH" "hy2-safe 设置文件"
+  if [[ -f "$SETTINGS_PATH" ]]; then
+    validate_root_secret_file "$SETTINGS_PATH" "hy2-safe 设置文件"
+    managed_install=1
+  fi
+  if load_account_ownership; then
+    ownership_recorded=1
+    managed_install=1
+    validate_recorded_service_identity
+  fi
+  [[ "$managed_install" -eq 1 ]] ||
+    die "未检测到 hy2-safe 设置或账号归属记录，拒绝删除未知实例。"
 
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -2331,6 +2542,12 @@ command_uninstall() {
   printf '  - Hysteria 2 程序、旧版本、管理脚本和 systemd 服务\n'
   printf '  - Hy2 服务端配置、客户端密码和 ACME 证书\n'
   printf '  - Telegram Bot Token、通知程序和通知状态\n'
+  if [[ "$ownership_recorded" -eq 1 ]] &&
+    { [[ "$SERVICE_USER_CREATED" -eq 1 ]] || [[ "$SERVICE_GROUP_CREATED" -eq 1 ]]; }; then
+    printf '  - 有 UID/GID 归属记录证明由 hy2-safe 创建的 hysteria 服务账号/组\n'
+  else
+    printf '  - hysteria 服务账号/组缺少创建归属证明，将保留并明确提示\n'
+  fi
   printf '自动安装的通用系统依赖不会删除，以免影响其他程序。\n'
   printf '警告：短时间反复完整卸载重装会反复申请新证书，可能触发证书机构频率限制。\n'
   if [[ "$assume_yes" -eq 0 ]]; then
@@ -2348,6 +2565,26 @@ command_uninstall() {
   systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
   systemctl disable --now "$TIMER_NAME" >/dev/null 2>&1 || true
   systemctl disable --now "$NOTIFIER_NAME" >/dev/null 2>&1 || true
+  systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null &&
+    die "Hysteria 服务仍在运行，拒绝继续卸载。"
+  systemctl is-active --quiet "$NOTIFIER_NAME" 2>/dev/null &&
+    die "Telegram 提醒服务仍在运行，拒绝继续卸载。"
+
+  if [[ "$SERVICE_USER_CREATED" -eq 1 ]] && getent passwd hysteria >/dev/null 2>&1; then
+    service_uid="$(id -u hysteria)"
+    service_user_has_processes "$service_uid" &&
+      die "停止服务后仍有进程使用 hysteria 用户（UID ${service_uid}），拒绝删除账号。"
+    userdel hysteria
+    getent passwd hysteria >/dev/null 2>&1 &&
+      die "userdel 返回成功，但 hysteria 用户仍然存在。"
+  fi
+  if [[ "$SERVICE_GROUP_CREATED" -eq 1 ]] && getent group hysteria >/dev/null 2>&1; then
+    validate_service_group
+    groupdel hysteria
+    getent group hysteria >/dev/null 2>&1 &&
+      die "groupdel 返回成功，但 hysteria 组仍然存在。"
+  fi
+
   rm -f -- \
     "$SERVICE_PATH" \
     "$UPDATE_SERVICE_PATH" \
@@ -2359,7 +2596,14 @@ command_uninstall() {
     "$MANAGER_PATH" \
     "$DEFAULT_DOWNLOAD_PATH"
   remove_managed_tree "$CONFIG_DIR"
-  remove_managed_tree "$STATE_DIR"
+  if [[ "$SERVICE_USER_CREATED" -eq 1 ]]; then
+    remove_managed_tree "$STATE_DIR"
+  elif [[ -L "$STATE_DIR" ]]; then
+    warn "未删除缺少归属证明且为符号链接的 hysteria 家目录：$STATE_DIR"
+  else
+    remove_managed_tree "${STATE_DIR}/acme"
+    rmdir -- "$STATE_DIR" >/dev/null 2>&1 || true
+  fi
   remove_managed_tree "$NOTIFIER_STATE_DIR"
   remove_managed_tree "$NOTIFIER_PRIVATE_STATE_DIR"
   systemctl daemon-reload
@@ -2369,7 +2613,12 @@ command_uninstall() {
     "$NOTIFIER_NAME" >/dev/null 2>&1 || true
 
   info "Hy2 程序、配置、证书、密码、Telegram Token 和通知状态已完整删除。"
-  printf '保留了通用系统依赖和 hysteria 低权限系统账号；它们不会影响下次重新安装。\n'
+  if [[ "$ownership_recorded" -eq 1 ]] &&
+    { [[ "$SERVICE_USER_CREATED" -eq 1 ]] || [[ "$SERVICE_GROUP_CREATED" -eq 1 ]]; }; then
+    printf '有归属记录的 hysteria 服务账号/组已删除；root 登录账号未被修改。\n'
+  else
+    printf '保留了通用系统依赖。hysteria 账号/组因缺少 hy2-safe 创建归属证明也已保留，未冒险误删。\n'
+  fi
 }
 
 command_menu() {
@@ -2379,7 +2628,6 @@ command_menu() {
   if [[ -f "$SETTINGS_PATH" ]]; then
     validate_root_secret_file "$SETTINGS_PATH" "hy2-safe 设置文件"
     printf '当前状态：已检测到 hy2-safe 安装\n'
-    install_manager_copy
   else
     printf '当前状态：尚未安装 Hy2\n'
   fi
@@ -2405,13 +2653,31 @@ EOF
       command_install
       ;;
     2) command_uninstall ;;
-    3) command_telegram_add ;;
-    4) command_telegram_replace ;;
-    5) command_telegram_disable ;;
-    6) show_client ;;
+    3)
+      refresh_managed_runtime
+      command_telegram_add
+      ;;
+    4)
+      refresh_managed_runtime
+      command_telegram_replace
+      ;;
+    5)
+      refresh_managed_runtime
+      command_telegram_disable
+      ;;
+    6)
+      refresh_managed_runtime
+      show_client
+      ;;
     7) command_configure ;;
-    8) command_update ;;
-    9) command_status ;;
+    8)
+      refresh_managed_runtime
+      command_update
+      ;;
+    9)
+      refresh_managed_runtime
+      command_status
+      ;;
     0) info "已退出。" ;;
     *) die "无效选项：$choice" ;;
   esac
@@ -2442,6 +2708,7 @@ main() {
     telegram-logs) command_telegram_logs "$@" ;;
     telegram-disable) command_telegram_disable "$@" ;;
     telegram-replace) command_telegram_replace "$@" ;;
+    verify-service-account) command_verify_service_account "$@" ;;
     uninstall) command_uninstall "$@" ;;
     help | -h | --help) usage ;;
     *) die "未知命令：$command。请运行 $PROGRAM help。" ;;
