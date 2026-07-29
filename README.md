@@ -12,12 +12,13 @@
 - 从 Hysteria 官方 GitHub 仓库安装最新稳定版，并校验官方 SHA-256。
 - 使用你自己的域名，由 Hysteria 自动申请和续期公开可信的 TLS 证书。
 - 默认开启原生 UDP 端口跳跃，范围为 `20000-50000`。
-- 不硬编码上传/下载 Mbps；服务端拒绝客户端提交的固定带宽值，默认使用较稳健的自适应 BBR，避免错误带宽触发 Brutal 丢包补偿。
+- 不硬编码上传/下载 Mbps；服务端不采用客户端手工填写的固定速度，默认使用较稳健的自适应 BBR，根据当前整条网络路径动态升降速。
 - 使用系统密码学随机源生成约 256 bit 熵的连接密码。
 - 默认每周检查 Hysteria 官方稳定版；更新失败会自动恢复旧版本。
 - Hysteria 以独立低权限用户运行。
 - 默认返回很小的本机伪装内容，不反向代理 Bing 等第三方网站。
 - 输出官方客户端完整 YAML、官方分享链接和 v2rayN/v2rayNG 兼容链接。
+- 直接运行脚本即可打开中文管理菜单，完成安装、完整卸载和 Telegram 管理。
 - 可选开启 Telegram 成功连接提醒，并自动合并网络抖动产生的重复消息。
 
 ## 开始前要准备什么
@@ -87,7 +88,7 @@ Hy2 使用 UDP/QUIC。Cloudflare 普通小黄云不能转发这种自定义 UDP 
 你平时使用 `root` 登录，可以复制下面一整行：
 
 ```bash
-curl -fL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh -o /root/hy2-safe.sh && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh install
+curl -fL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh -o /root/hy2-safe.sh && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
 ```
 
 这个写法会先把脚本保存到磁盘，再执行，不是 `curl | bash`。如果想先查看内容，使用：
@@ -99,10 +100,27 @@ curl -fL --proto '=https' --tlsv1.2 \
 
 less /root/hy2-safe.sh
 chmod 0700 /root/hy2-safe.sh
-/root/hy2-safe.sh install
+/root/hy2-safe.sh
 ```
 
-在 `less` 中按 `q` 退出。
+在 `less` 中按 `q` 退出。直接运行且不附加命令时，会显示：
+
+```text
+hy2-safe 一键管理菜单
+
+  1) 安装 Hy2
+  2) 完整卸载 Hy2
+  3) 添加 Telegram 通知
+  4) 更换 Telegram 机器人
+  5) 删除 Telegram 通知
+  6) 显示客户端配置
+  7) 修改 Hy2 配置
+  8) 更新 Hysteria 2
+  9) 查看服务状态
+  0) 退出
+```
+
+第一次使用选择 `1`。安装完成后，系统中也可以直接运行 `hy2-safe` 再次打开同一菜单。原有的 `hy2-safe install`、`hy2-safe update` 等命令仍然保留，方便自动化或排错。
 
 ## 安装时怎么选择
 
@@ -179,7 +197,7 @@ congestion:
   bbrProfile: conservative
 ```
 
-这表示服务端不会采信客户端随意填写的 Mbps，而是使用会根据网络状况自行调整的非 Brutal 拥塞控制。官方客户端 YAML 同样明确选择 `bbrProfile: conservative`。分享链接不包含带宽值，这也符合 Hysteria 2 官方 URI 规范；该规范明确说明带宽属于每个客户端自己的本地参数，不应写进分享链接。
+这里不是“不信任你自己的设备或连接身份”，而是不采用手工填写、可能已经不符合当前 Wi-Fi/手机网络状况的固定 Mbps。BBR 会根据设备到 VPS 的整条路径，包括本地 Wi-Fi、运营商线路和 VPS 出入口的实际传输情况动态调整。官方客户端 YAML 同样明确选择 `bbrProfile: conservative`。分享链接不包含带宽值，这也符合 Hysteria 2 官方 URI 规范；该规范明确说明带宽属于每个客户端自己的本地参数，不应写进分享链接。
 
 这项设置可以降低错误带宽参数导致的激进发包风险，但无法保证运营商一定不做 UDP QoS，也无法保证 IP 永不受限。Hy2 本身仍然是 UDP/QUIC 协议；实际传输大量数据时仍会产生相应 UDP 流量。
 
@@ -268,6 +286,9 @@ hy2-safe status
 
 # 关闭提醒并从配置中删除 Bot Token
 hy2-safe telegram-disable
+
+# 更换机器人：新机器人测试成功后才替换，失败则保留旧机器人
+hy2-safe telegram-replace
 ```
 
 Bot Token 保存在 root-only 的 `0600` 配置文件中，并通过 systemd 凭据功能只交给受限的提醒进程。不要把 Token 发到聊天群、截图或 GitHub；如果 Token 泄露，应立即在 `@BotFather` 撤销并重新生成。
@@ -395,7 +416,7 @@ hy2-safe update
 # 查看最近日志
 hy2-safe logs
 
-# 卸载服务
+# 完整卸载服务、配置、证书、密码和 Telegram 数据
 hy2-safe uninstall
 ```
 
@@ -432,15 +453,23 @@ hy2-safe uninstall
 
 ## 卸载
 
+最方便的方法是运行 `hy2-safe`，选择 `2) 完整卸载 Hy2`。也可以直接执行：
+
 ```bash
 hy2-safe uninstall
 ```
 
-为避免误删，卸载会保留配置和 ACME 证书。以后恢复：
+由于卸载会永久删除客户端密码、ACME 证书和 Telegram Token，脚本会要求输入 `DELETE` 再执行。卸载后会删除：
 
-```bash
-/root/hy2-safe.sh install --reinstall --non-interactive
-```
+- Hysteria 当前程序和回滚用旧版本；
+- `/usr/local/sbin/hy2-safe`、推荐下载位置 `/root/hy2-safe.sh` 及全部 systemd 服务；
+- `/etc/hysteria` 中的服务端配置、密码和 Telegram Token；
+- `/var/lib/hysteria` 中的 ACME 证书；
+- Telegram 通知运行状态。
+
+脚本不会自动卸载 `curl`、`python3` 等通用系统依赖，也会保留无登录权限的 `hysteria` 低权限系统账号，避免误伤其他程序；这些内容不会导致下次安装报错。完整卸载后重新下载脚本并选择安装，就是一次全新安装。
+
+自动化场景可以使用 `hy2-safe uninstall --yes` 跳过确认，但不建议手工使用时省略确认。
 
 ## 官方资料
 
