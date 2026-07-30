@@ -15,7 +15,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.0.2"
+readonly PROGRAM_VERSION="1.0.3"
 readonly REPOSITORY="apernet/hysteria"
 readonly API_URL="https://api.github.com/repos/${REPOSITORY}/releases/latest"
 readonly RELEASE_URL="https://github.com/${REPOSITORY}/releases/download"
@@ -48,19 +48,92 @@ SERVICE_GROUP_CREATED=0
 SERVICE_USER_UID=""
 SERVICE_GROUP_GID=""
 
+COLOR_RESET=""
+COLOR_BOLD=""
+COLOR_CYAN=""
+COLOR_GREEN=""
+COLOR_YELLOW=""
+COLOR_RED=""
+
+initialize_colors() {
+  if [[ -t 1 && -z "${NO_COLOR+x}" && "${TERM:-dumb}" != "dumb" ]]; then
+    COLOR_RESET=$'\033[0m'
+    COLOR_BOLD=$'\033[1m'
+    COLOR_CYAN=$'\033[36m'
+    COLOR_GREEN=$'\033[32m'
+    COLOR_YELLOW=$'\033[33m'
+    COLOR_RED=$'\033[31m'
+  fi
+}
+
+initialize_colors
+
 info() {
   if [[ "$QUIET" -eq 0 ]]; then
-    printf '[信息] %s\n' "$*"
+    printf '%b[信息]%b %s\n' "$COLOR_GREEN" "$COLOR_RESET" "$*"
   fi
 }
 
 warn() {
-  printf '[警告] %s\n' "$*" >&2
+  printf '%b[警告]%b %s\n' "$COLOR_YELLOW" "$COLOR_RESET" "$*" >&2
 }
 
 die() {
-  printf '[错误] %s\n' "$*" >&2
+  printf '%b[错误]%b %s\n' "$COLOR_RED" "$COLOR_RESET" "$*" >&2
   exit 1
+}
+
+prompt_input() {
+  local message="$1"
+  local variable_name="$2"
+  local input_value=""
+  printf '%b%s%b' "$COLOR_YELLOW" "$message" "$COLOR_RESET" >&2
+  IFS= read -r input_value
+  printf -v "$variable_name" '%s' "$input_value"
+}
+
+prompt_secret() {
+  local message="$1"
+  local variable_name="$2"
+  local input_value=""
+  printf '%b%s%b' "$COLOR_YELLOW" "$message" "$COLOR_RESET" >&2
+  IFS= read -r -s input_value
+  printf '\n' >&2
+  printf -v "$variable_name" '%s' "$input_value"
+}
+
+prompt_yes_no() {
+  local message="$1"
+  local default_answer="$2"
+  local answer=""
+  local suffix=""
+  case "$default_answer" in
+    yes) suffix="[Y/n，直接回车默认：是]: " ;;
+    no) suffix="[y/N，直接回车默认：否]: " ;;
+    *) die "内部错误：无效的是/否默认值。"
+  esac
+  while true; do
+    prompt_input "${message}${suffix}" answer
+    case "${answer,,}" in
+      y | yes) return 0 ;;
+      n | no) return 1 ;;
+      "")
+        if [[ "$default_answer" == "yes" ]]; then
+          return 0
+        fi
+        return 1
+        ;;
+      *) warn "请输入 y（是）或 n（否）；也可以直接回车使用提示中的默认值。" ;;
+    esac
+  done
+}
+
+menu_item() {
+  local number="$1"
+  local label="$2"
+  printf '  %b%b%s)%b %b%s%b\n' \
+    "$COLOR_BOLD" "$COLOR_YELLOW" "$number" "$COLOR_RESET" \
+    "$COLOR_YELLOW" "$label" "$COLOR_RESET"
 }
 
 cleanup() {
@@ -117,6 +190,7 @@ install/configure 选项：
   - ACME 通常还需要放行 TCP 80/443；Hysteria 数据端口需要放行 UDP。
   - Telegram 提醒默认关闭；启用后只向设置时确认的私人 Chat ID 发消息。
   - 完整卸载会删除 Hy2 配置、证书和 Telegram Token，无法撤销。
+  - 交互终端默认启用颜色；设置 NO_COLOR=1 可关闭彩色输出。
 EOF
 }
 
@@ -608,44 +682,53 @@ random_password() {
 prompt_install_values() {
   local non_interactive="$1"
   local answer=""
+  local masquerade_hint=""
 
   if [[ -z "$DOMAIN" && "$non_interactive" -eq 0 ]]; then
-    read -r -p "证书/SNI 域名（需解析到本 VPS）: " DOMAIN
+    prompt_input "证书/SNI 域名（必须解析到本 VPS）: " DOMAIN
   fi
   DOMAIN="${DOMAIN,,}"
 
   if [[ -z "$EMAIL" && "$non_interactive" -eq 0 ]]; then
-    read -r -p "ACME 通知邮箱: " EMAIL
+    prompt_input "ACME 通知邮箱: " EMAIL
   fi
 
   if [[ "$PORT_MODE_WAS_SET" -eq 0 && "$non_interactive" -eq 0 ]]; then
     if [[ "$PORT_MODE" == "range" ]]; then
-      read -r -p "开启原生端口跳跃？[Y/n]: " answer
+      if prompt_yes_no "开启原生端口跳跃？" yes; then
+        PORT_MODE="range"
+      else
+        PORT_MODE="single"
+      fi
     else
-      read -r -p "开启原生端口跳跃？[y/N]: " answer
+      if prompt_yes_no "开启原生端口跳跃？" no; then
+        PORT_MODE="range"
+      else
+        PORT_MODE="single"
+      fi
     fi
-    case "${answer,,}" in
-      y | yes) PORT_MODE="range" ;;
-      n | no) PORT_MODE="single" ;;
-      *) : ;;
-    esac
   fi
 
   if [[ "$PORT_VALUE_WAS_SET" -eq 0 && "$non_interactive" -eq 0 ]]; then
     if [[ "$PORT_MODE" == "range" ]]; then
-      read -r -p "UDP 跳跃端口范围 [${HOP_START}-${HOP_END}]: " answer
+      prompt_input "UDP 跳跃端口范围 [直接回车默认：${HOP_START}-${HOP_END}]: " answer
       if [[ -n "$answer" ]]; then
         HOP_START="${answer%-*}"
         HOP_END="${answer#*-}"
       fi
     else
-      read -r -p "Hysteria UDP 端口 [${PORT}]: " answer
+      prompt_input "Hysteria UDP 端口 [直接回车默认：${PORT}]: " answer
       [[ -n "$answer" ]] && PORT="$answer"
     fi
   fi
 
   if [[ "$MASQUERADE_WAS_SET" -eq 0 && "$non_interactive" -eq 0 ]]; then
-    read -r -p "自定义 HTTPS 伪装站点（留空保留当前模式）: " answer
+    if [[ "$MASQUERADE_MODE" == "proxy" ]]; then
+      masquerade_hint="保留当前反代 ${MASQUERADE_URL}"
+    else
+      masquerade_hint="使用本机静态伪装页"
+    fi
+    prompt_input "自定义 HTTPS 伪装站点 [直接回车默认：${masquerade_hint}]: " answer
     if [[ -n "$answer" ]]; then
       MASQUERADE_MODE="proxy"
       MASQUERADE_URL="$answer"
@@ -654,15 +737,18 @@ prompt_install_values() {
 
   if [[ "$AUTO_UPDATE_WAS_SET" -eq 0 && "$non_interactive" -eq 0 ]]; then
     if [[ "$AUTO_UPDATE" -eq 1 ]]; then
-      read -r -p "开启每周自动更新并在失败时回滚？[Y/n]: " answer
+      if prompt_yes_no "开启每周自动更新并在失败时回滚？" yes; then
+        AUTO_UPDATE=1
+      else
+        AUTO_UPDATE=0
+      fi
     else
-      read -r -p "开启每周自动更新并在失败时回滚？[y/N]: " answer
+      if prompt_yes_no "开启每周自动更新并在失败时回滚？" no; then
+        AUTO_UPDATE=1
+      else
+        AUTO_UPDATE=0
+      fi
     fi
-    case "${answer,,}" in
-      y | yes) AUTO_UPDATE=1 ;;
-      n | no) AUTO_UPDATE=0 ;;
-      *) : ;;
-    esac
   fi
 
   [[ -n "$PASSWORD" ]] || PASSWORD="$(random_password)"
@@ -2086,7 +2172,6 @@ EOF
 
 command_install() {
   local install_arg
-  local telegram_answer=""
   require_root
   require_systemd
   require_supported_os
@@ -2165,18 +2250,14 @@ command_install() {
   fi
   if [[ "$NON_INTERACTIVE" -eq 0 && "$TELEGRAM_ENABLED" -eq 0 ]]; then
     printf '\nTelegram 提醒是可选功能；设置失败不会影响已经运行的 Hy2。\n'
-    read -r -p "是否现在开启 Telegram 成功连接提醒？[y/N]: " telegram_answer
-    case "${telegram_answer,,}" in
-      y | yes)
-        cleanup
-        TMP_ROOT=""
-        flock -u 9
-        command_telegram_setup
-        ;;
-      *)
-        printf '已跳过。以后需要时可运行：hy2-safe telegram-setup\n'
-        ;;
-    esac
+    if prompt_yes_no "是否现在开启 Telegram 成功连接提醒？" no; then
+      cleanup
+      TMP_ROOT=""
+      flock -u 9
+      command_telegram_setup
+    else
+      printf '已跳过。以后需要时可运行：hy2-safe telegram-setup\n'
+    fi
   fi
 }
 
@@ -2290,8 +2371,7 @@ command_telegram_setup() {
     head -n 1 -- "$token_input_file" | tr -d '\r\n' >"$token_file"
   else
     printf '请先通过 Telegram 的 @BotFather 创建机器人。\n'
-    read -r -s -p "请输入 Bot Token（输入时不会显示）: " TELEGRAM_BOT_TOKEN
-    printf '\n'
+    prompt_secret "请输入 Bot Token（输入时不会显示）: " TELEGRAM_BOT_TOKEN
     printf '%s' "$TELEGRAM_BOT_TOKEN" >"$token_file"
     unset TELEGRAM_BOT_TOKEN
   fi
@@ -2300,14 +2380,14 @@ command_telegram_setup() {
     die "Bot Token 格式无效。"
 
   if [[ -z "$requested_chat_id" ]]; then
-    read -r -p "如果知道自己的私人 Chat ID，请输入；不知道请直接回车: " requested_chat_id
+    prompt_input "私人 Chat ID [知道请直接输入；不知道请直接回车使用一次性配对码]: " requested_chat_id
     if [[ -n "$requested_chat_id" ]]; then
       validate_telegram_chat_id "$requested_chat_id" ||
         die "Chat ID 必须是私人聊天的正整数。"
     else
       pairing_code="HY2-$(openssl rand -hex 8)"
       printf '请在 Telegram 私聊机器人中发送下面这段一次性配对码：\n\n%s\n\n' "$pairing_code"
-      read -r -p "确认配对码已经成功发送后，按回车继续。"
+      prompt_input "确认配对码已经成功发送后，请直接回车继续: " confirmation
       discover_telegram_chats "$token_file" "$candidates_file" "$pairing_code"
       requested_chat_id="$(read_discovered_chat_id "$candidates_file")" ||
         die "无法安全确定唯一的私人 Chat ID。"
@@ -2319,7 +2399,7 @@ command_telegram_setup() {
   info "发送 Telegram 测试消息。"
   telegram_send_test "$token_file" "$requested_chat_id"
   if [[ -t 0 && -z "$token_input_file" ]]; then
-    read -r -p "请确认自己的 Telegram 已收到测试消息；确认请输入 YES: " confirmation
+    prompt_input "请确认自己的 Telegram 已收到测试消息；确认请输入 YES: " confirmation
     [[ "$confirmation" == "YES" ]] ||
       die "未确认收到测试消息，未保存 Telegram 配置。"
   fi
@@ -2576,7 +2656,7 @@ command_uninstall() {
   printf '警告：短时间反复完整卸载重装会反复申请新证书，可能触发证书机构频率限制。\n'
   if [[ "$assume_yes" -eq 0 ]]; then
     [[ -t 0 ]] || die "非交互卸载必须明确添加 --yes。"
-    read -r -p "此操作无法撤销；确认完整卸载请输入 DELETE: " answer
+    prompt_input "此操作无法撤销；确认完整卸载请输入 DELETE: " answer
     [[ "$answer" == "DELETE" ]] || {
       info "已取消卸载，没有删除任何内容。"
       return
@@ -2648,27 +2728,31 @@ command_uninstall() {
 command_menu() {
   local choice=""
   require_root
-  printf '\nhy2-safe v%s 一键管理菜单\n' "$PROGRAM_VERSION"
+  printf '\n%b%b========================================%b\n' \
+    "$COLOR_BOLD" "$COLOR_CYAN" "$COLOR_RESET"
+  printf '%b%b  hy2-safe v%s · Hysteria 2 管理菜单%b\n' \
+    "$COLOR_BOLD" "$COLOR_CYAN" "$PROGRAM_VERSION" "$COLOR_RESET"
+  printf '%b%b========================================%b\n' \
+    "$COLOR_BOLD" "$COLOR_CYAN" "$COLOR_RESET"
   if [[ -f "$SETTINGS_PATH" ]]; then
     validate_root_secret_file "$SETTINGS_PATH" "hy2-safe 设置文件"
-    printf '当前状态：已检测到 hy2-safe 安装\n'
+    printf '%b当前状态：已安装 Hy2%b\n' "$COLOR_GREEN" "$COLOR_RESET"
   else
-    printf '当前状态：尚未安装 Hy2\n'
+    printf '%b当前状态：尚未安装 Hy2%b\n' "$COLOR_YELLOW" "$COLOR_RESET"
   fi
-  cat <<'EOF'
-
-  1) 安装 Hy2
-  2) 完整卸载 Hy2
-  3) 添加 Telegram 通知
-  4) 更换 Telegram 机器人
-  5) 删除 Telegram 通知
-  6) 显示客户端配置
-  7) 修改 Hy2 配置
-  8) 立即检查更新（默认另有每周自动更新）
-  9) 查看版本、服务和自动更新状态
-  0) 退出
-EOF
-  read -r -p "请输入选项 [0-9]: " choice
+  printf '\n'
+  menu_item "1" "安装 Hy2"
+  menu_item "2" "完整卸载 Hy2"
+  menu_item "3" "添加 Telegram 通知"
+  menu_item "4" "更换 Telegram 机器人"
+  menu_item "5" "删除 Telegram 通知"
+  menu_item "6" "显示客户端配置"
+  menu_item "7" "修改 Hy2 配置"
+  menu_item "8" "立即检查更新（默认另有每周自动更新）"
+  menu_item "9" "查看版本、服务和自动更新状态"
+  menu_item "0" "退出"
+  printf '\n'
+  prompt_input "请输入菜单编号 [0-9]: " choice
   case "$choice" in
     1)
       if [[ -f "$SETTINGS_PATH" ]]; then
