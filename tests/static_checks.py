@@ -1,5 +1,6 @@
 from pathlib import Path
 import datetime as dt
+import json
 import os
 import re
 
@@ -20,7 +21,7 @@ def forbid(pattern: str, message: str) -> None:
 
 
 require(r"^set -Eeuo pipefail$", "strict Bash mode is required")
-require(r'PROGRAM_VERSION="1\.0\.5"', "the release must expose its manager version")
+require(r'PROGRAM_VERSION="1\.0\.6"', "the release must expose its manager version")
 require(r"require_supported_os", "installations must be limited to Debian 12/13")
 require(r"sha256sum", "release binaries must be checksum-verified")
 require(r"release_asset_field", "release metadata must be parsed structurally")
@@ -91,6 +92,10 @@ require(r"if version == 1:", "v1 notifier state must migrate forward")
 require(r"REPORT_HOUR = 8", "daily reports must use the documented Beijing schedule")
 require(r"MONTHLY_REPORT_MINUTE = 5", "monthly reports must follow the daily report")
 require(r"telegram-report\) command_telegram_report", "manual traffic reports need a direct command")
+require(r"telegram-name\) command_telegram_name", "Telegram instance names need a direct command")
+require(r'"display_name": display_name', "the notifier credential must store the instance name")
+require(r"instance_line\(config\)", "every report family must expose the instance name")
+require(r"设置 Telegram 消息名称", "the menu must expose instance-name management")
 require(r"--signal=SIGUSR1", "manual reports must signal only the running notifier")
 require(r'f"v4:\{network\.network_address\}/24"', "IPv4 alerts must group by /24")
 require(r'f"v6:\{network\.network_address\}/48"', "IPv6 alerts must group by /48")
@@ -225,11 +230,32 @@ sample_traffic = namespace["sample_traffic"]
 queue_scheduled_reports = namespace["queue_scheduled_reports"]
 monthly_report_text = namespace["monthly_report_text"]
 manual_report_text = namespace["manual_report_text"]
+aggregate_days = namespace["aggregate_days"]
+records_for_month = namespace["records_for_month"]
 format_bytes = namespace["format_bytes"]
 send_message = namespace["send_message"]
 hy2_traffic_totals = namespace["hy2_traffic_totals"]
 network_counters = namespace["network_counters"]
 namespace["online_line"] = lambda _config: "当前在线客户端：1"
+
+class LegacyConfigPath:
+    def read_text(self, encoding: str) -> str:
+        if encoding != "utf-8":
+            raise AssertionError("Telegram credentials must be decoded as UTF-8")
+        return json.dumps(
+            {
+                "token": "123456:" + "A" * 32,
+                "chat_id": "123456789",
+                "stats_port": 19090,
+                "stats_secret": "B" * 32,
+            }
+        )
+
+
+namespace["config_path"] = LegacyConfigPath()
+legacy_config = namespace["load_config"]()
+if legacy_config["display_name"] != "Hy2 节点":
+    raise AssertionError("v1.0.5 Telegram credentials must receive a safe default name")
 
 v4_key, v4_label = hidden_ip_group(parse_remote_ip("123.45.67.89:443"))
 if (v4_key, v4_label) != ("v4:123.45.67.0/24", "123.45.67.*"):
@@ -278,7 +304,7 @@ if trailing_ansi_event is None or trailing_ansi_event[0] != "123.45.67.89:4567":
     raise AssertionError("trailing ANSI data must not hide successful connections")
 
 state = default_state()
-config = {}
+config = {"display_name": "洛杉矶 01"}
 process_connection(state, config, "123.45.67.89:4567", 1000.0)
 process_connection(state, config, "123.45.67.90:5678", 1010.0)
 group = state["groups"]["v4:123.45.67.0/24"]
@@ -292,6 +318,15 @@ if "hourly:v4:123.45.67.0/24" not in state["outbox"]:
 process_connection(state, config, "123.45.67.91:6789", 100000.0)
 if "returned:v4:123.45.67.0/24" not in state["outbox"]:
     raise AssertionError("a /24 returning after 24 hours must alert again")
+
+escaped_state = default_state()
+escaped_config = {"display_name": "东京 <主机&01>"}
+process_connection(
+    escaped_state, escaped_config, "198.51.100.77:4567", 1000.0
+)
+escaped_text = escaped_state["outbox"]["new:v4:198.51.100.0/24"]["text"]
+if "东京 &lt;主机&amp;01&gt;" not in escaped_text or "东京 <主机&01>" in escaped_text:
+    raise AssertionError("Telegram instance names must be HTML-escaped")
 
 beijing = dt.timezone(dt.timedelta(hours=8))
 sample_time = dt.datetime(2026, 7, 30, 12, 0, tzinfo=beijing).timestamp()
@@ -398,32 +433,60 @@ if (
 ) != (700, 1100, 750, 1280):
     raise AssertionError("counter resets must not create negatives or giant spikes")
 
+july_snapshot = dict(first_day)
+august_time = dt.datetime(2026, 8, 1, 0, 1, tzinfo=beijing).timestamp()
+hy2_sample.update(upload=180, download=320)
+nic_sample["eth0"].update(receive=150, send=200)
+sample_traffic(traffic_state, {}, august_time)
+august_day = traffic_state["traffic"]["days"]["2026-08-01"]
+if (
+    august_day["hy2_upload"],
+    august_day["hy2_download"],
+    august_day["vps_receive"],
+    august_day["vps_send"],
+) != (80, 120, 100, 120):
+    raise AssertionError("a new calendar month must start its own traffic totals")
+if first_day != july_snapshot:
+    raise AssertionError("new-month samples must not change prior-month records")
+july_total = aggregate_days(
+    [item[1] for item in records_for_month(traffic_state, "2026-07")]
+)
+august_total = aggregate_days(
+    [item[1] for item in records_for_month(traffic_state, "2026-08")]
+)
+if july_total["hy2_upload"] != 700 or august_total["hy2_upload"] != 80:
+    raise AssertionError("monthly totals must include only their own calendar month")
+
 before_report = dt.datetime(2026, 7, 31, 7, 59, tzinfo=beijing).timestamp()
-queue_scheduled_reports(traffic_state, before_report)
+queue_scheduled_reports(traffic_state, config, before_report)
 if any(key.startswith("daily:") for key in traffic_state["outbox"]):
     raise AssertionError("daily reports must not be sent before 08:00 Beijing time")
 daily_time = dt.datetime(2026, 7, 31, 8, 0, tzinfo=beijing).timestamp()
-queue_scheduled_reports(traffic_state, daily_time)
+queue_scheduled_reports(traffic_state, config, daily_time)
 daily_item = traffic_state["outbox"].get("daily:2026-07-30")
 if daily_item is None or not daily_item["silent"]:
     raise AssertionError("the previous-day report must be queued silently at 08:00")
-queue_scheduled_reports(traffic_state, daily_time + 60)
+queue_scheduled_reports(traffic_state, config, daily_time + 60)
 if len([key for key in traffic_state["outbox"] if key.startswith("daily:")]) != 1:
     raise AssertionError("daily reports must be idempotent")
 
 monthly_before = dt.datetime(2026, 8, 1, 8, 4, tzinfo=beijing).timestamp()
-queue_scheduled_reports(traffic_state, monthly_before)
+queue_scheduled_reports(traffic_state, config, monthly_before)
 if "monthly:2026-07" in traffic_state["outbox"]:
     raise AssertionError("monthly reports must not be sent before 08:05")
 monthly_time = dt.datetime(2026, 8, 1, 8, 5, tzinfo=beijing).timestamp()
-queue_scheduled_reports(traffic_state, monthly_time)
+queue_scheduled_reports(traffic_state, config, monthly_time)
 monthly_item = traffic_state["outbox"].get("monthly:2026-07")
 if monthly_item is None or not monthly_item["silent"]:
     raise AssertionError("the previous-month report must be queued silently at 08:05")
-if "Hy2 月度报告" not in monthly_report_text(traffic_state, "2026-07"):
+if "Hy2 月度报告" not in monthly_report_text(
+    traffic_state, config, "2026-07"
+):
     raise AssertionError("monthly report formatting is missing")
+if "洛杉矶 01" not in monthly_item["text"]:
+    raise AssertionError("scheduled reports must identify their VPS instance")
 if "VPS 网卡与 Hy2 统计口径不同" not in manual_report_text(
-    traffic_state, monthly_time
+    traffic_state, config, monthly_time
 ):
     raise AssertionError("manual reports must explain the incompatible traffic scopes")
 
@@ -433,7 +496,7 @@ if README.count("```") % 2:
     raise AssertionError("README fenced code blocks must be balanced")
 if "[!IMPORTANT]" not in README or "[!WARNING]" not in README:
     raise AssertionError("README must make the main safety warnings prominent")
-if "hy2-safe v1.0.5 · Hysteria 2 管理菜单" not in README:
+if "hy2-safe v1.0.6 · Hysteria 2 管理菜单" not in README:
     raise AssertionError("README menu version must match the release")
 if "/etc/hysteria/hy2-safe-account.env" not in README:
     raise AssertionError("README must explain the account ownership record")
@@ -445,6 +508,8 @@ if "NO_COLOR=1 hy2-safe" not in README:
     raise AssertionError("README must explain how to disable interactive colors")
 if "直接回车默认：是" not in README or "直接回车默认：否" not in README:
     raise AssertionError("README must explain yes/no defaults in plain language")
+if "进入下个月后新月份从 `0` 开始" not in README:
+    raise AssertionError("README must explain natural-month traffic resets")
 combined_public_text = SCRIPT + "\n" + README
 for email in re.findall(
     r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}\b",
