@@ -15,7 +15,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.0.6"
+readonly PROGRAM_VERSION="1.0.7"
 readonly REPOSITORY="apernet/hysteria"
 readonly API_URL="https://api.github.com/repos/${REPOSITORY}/releases/latest"
 readonly RELEASE_URL="https://github.com/${REPOSITORY}/releases/download"
@@ -31,6 +31,8 @@ readonly STATE_DIR="/var/lib/hysteria"
 readonly SERVICE_PATH="/etc/systemd/system/hysteria-server.service"
 readonly UPDATE_SERVICE_PATH="/etc/systemd/system/hy2-safe-update.service"
 readonly UPDATE_TIMER_PATH="/etc/systemd/system/hy2-safe-update.timer"
+readonly HEALTH_SERVICE_PATH="/etc/systemd/system/hy2-safe-health.service"
+readonly HEALTH_TIMER_PATH="/etc/systemd/system/hy2-safe-health.timer"
 readonly NOTIFIER_PATH="/usr/local/libexec/hy2-safe-notifier.py"
 readonly NOTIFIER_CONFIG_PATH="${CONFIG_DIR}/telegram-notifier.json"
 readonly NOTIFIER_SERVICE_PATH="/etc/systemd/system/hy2-safe-notifier.service"
@@ -38,6 +40,7 @@ readonly NOTIFIER_STATE_DIR="/var/lib/hy2-safe-notifier"
 readonly NOTIFIER_PRIVATE_STATE_DIR="/var/lib/private/hy2-safe-notifier"
 readonly SERVICE_NAME="hysteria-server.service"
 readonly TIMER_NAME="hy2-safe-update.timer"
+readonly HEALTH_TIMER_NAME="hy2-safe-health.timer"
 readonly NOTIFIER_NAME="hy2-safe-notifier.service"
 readonly LOCK_PATH="/run/lock/hy2-safe.lock"
 
@@ -47,6 +50,8 @@ SERVICE_USER_CREATED=0
 SERVICE_GROUP_CREATED=0
 SERVICE_USER_UID=""
 SERVICE_GROUP_GID=""
+FAILURE_EVENT=""
+TELEGRAM_EVENT_IN_PROGRESS=0
 
 COLOR_RESET=""
 COLOR_BOLD=""
@@ -79,6 +84,12 @@ warn() {
 }
 
 die() {
+  if [[ -n "${FAILURE_EVENT:-}" && "${TELEGRAM_EVENT_IN_PROGRESS:-0}" -eq 0 ]] &&
+    declare -F send_telegram_system_event >/dev/null 2>&1; then
+    TELEGRAM_EVENT_IN_PROGRESS=1
+    send_telegram_system_event "$FAILURE_EVENT" "$*" >/dev/null 2>&1 || true
+    TELEGRAM_EVENT_IN_PROGRESS=0
+  fi
   printf '%b[错误]%b %s\n' "$COLOR_RED" "$COLOR_RESET" "$*" >&2
   exit 1
 }
@@ -151,6 +162,8 @@ usage() {
   ./hy2-safe.sh install [选项]
   hy2-safe configure [选项]
   hy2-safe update [--quiet]
+  hy2-safe rotate-password
+  hy2-safe certificate-check [--quiet]
   hy2-safe show-client
   hy2-safe status
   hy2-safe version
@@ -167,6 +180,7 @@ usage() {
 install/configure 选项：
   --domain DOMAIN            证书/SNI 域名，必须解析到本机
   --email EMAIL              ACME 证书通知邮箱
+  --acme-type http|tls       ACME 验证方式；默认 http（只需要 TCP 80）
   --port PORT                使用单 UDP 端口（关闭端口跳跃）
   --port-hopping START-END   使用原生端口跳跃范围，默认 50000-50500
   --hop-min SECONDS          随机跳跃最短间隔，默认 15 秒
@@ -190,7 +204,7 @@ install/configure 选项：
   - 当前版本只支持 Debian 12/13。
   - 不会清空现有防火墙链，也不会修改 UFW、firewalld 或云安全组。
   - 端口跳跃会让 Hysteria 原生创建并在停止时清理自己的 nftables/iptables 临时规则。
-  - ACME 通常还需要放行 TCP 80/443；Hysteria 数据端口需要放行 UDP。
+  - 默认 ACME HTTP-01 只需要 TCP 80；选择 tls 时只需要 TCP 443。
   - Telegram 提醒默认关闭；启用后只向设置时确认的私人 Chat ID 发消息。
   - 完整卸载会删除 Hy2 配置、证书和 Telegram Token，无法撤销。
   - 交互终端默认启用颜色；设置 NO_COLOR=1 可关闭彩色输出。
@@ -238,23 +252,23 @@ install_dependencies() {
   local missing=()
   local command_name
   for command_name in \
-    awk curl flock getent groupadd groupdel head id install openssl passwd python3 readlink sed \
-    sha256sum stat timeout tr uname useradd userdel; do
+    awk curl find flock getent groupadd groupdel head id install openssl passwd python3 readlink sed \
+    sha256sum ss stat timeout tr uname useradd userdel; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
       missing+=("$command_name")
     fi
   done
   [[ "${#missing[@]}" -eq 0 ]] && return
 
-  info "安装必要依赖：curl、CA 证书、OpenSSL、coreutils、util-linux、Python 3、awk、sed 和账号管理工具。"
+  info "安装必要依赖：curl、CA 证书、OpenSSL、coreutils、iproute2、findutils、Python 3 和账号管理工具。"
   command -v apt-get >/dev/null 2>&1 || die "Debian 系统中未找到 apt-get。"
   apt-get -o DPkg::Lock::Timeout=60 update
   DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y \
-    --no-install-recommends ca-certificates coreutils curl mawk openssl passwd python3 sed util-linux
+    --no-install-recommends ca-certificates coreutils curl findutils iproute2 mawk openssl passwd python3 sed util-linux
 
   for command_name in \
-    awk curl flock getent groupadd groupdel head id install openssl passwd python3 readlink sed \
-    sha256sum stat timeout tr uname useradd userdel; do
+    awk curl find flock getent groupadd groupdel head id install openssl passwd python3 readlink sed \
+    sha256sum ss stat timeout tr uname useradd userdel; do
     command -v "$command_name" >/dev/null 2>&1 || die "依赖安装后仍未找到：$command_name"
   done
 }
@@ -568,6 +582,13 @@ validate_port() {
   ((port >= 1 && port <= 65535))
 }
 
+validate_acme_type() {
+  case "$1" in
+    http | tls) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 validate_hop_interval() {
   local seconds="$1"
   [[ "$seconds" =~ ^[1-9][0-9]{0,3}$ ]] || return 1
@@ -697,6 +718,152 @@ random_password() {
   openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'
 }
 
+resolve_domain_addresses() {
+  python3 - "$1" <<'PY'
+import ipaddress
+import socket
+import sys
+
+addresses = set()
+try:
+    records = socket.getaddrinfo(sys.argv[1], None, type=socket.SOCK_STREAM)
+except socket.gaierror:
+    raise SystemExit(1)
+for record in records:
+    try:
+        address = ipaddress.ip_address(record[4][0].split("%", 1)[0])
+    except ValueError:
+        continue
+    if address.is_global:
+        addresses.add(str(address))
+for address in sorted(addresses, key=lambda item: (":" in item, item)):
+    print(address)
+if not addresses:
+    raise SystemExit(1)
+PY
+}
+
+detect_public_ip() {
+  local family="$1"
+  local response address
+  response="$(
+    curl_secure \
+      "-${family}" \
+      --max-time 15 \
+      --max-filesize 8192 \
+      https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null
+  )" || return 1
+  address="$(awk -F= '$1 == "ip" { print $2; exit }' <<<"$response")"
+  python3 - "$address" "$family" <<'PY'
+import ipaddress
+import sys
+
+try:
+    address = ipaddress.ip_address(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+family = 4 if sys.argv[2] == "4" else 6
+if address.version != family or not address.is_global:
+    raise SystemExit(1)
+print(address)
+PY
+}
+
+preflight_domain() {
+  local address public_v4="" public_v6="" expected=""
+  local verified=0
+  local -a addresses=()
+  mapfile -t addresses < <(resolve_domain_addresses "$DOMAIN") ||
+    die "域名 ${DOMAIN} 当前没有可用的公网 A/AAAA 解析，拒绝开始 ACME。"
+  (("${#addresses[@]}" > 0)) ||
+    die "域名 ${DOMAIN} 当前没有可用的公网 A/AAAA 解析，拒绝开始 ACME。"
+
+  public_v4="$(detect_public_ip 4 || true)"
+  public_v6="$(detect_public_ip 6 || true)"
+  [[ -n "$public_v4" ]] && info "检测到本机公网 IPv4：${public_v4}"
+  [[ -n "$public_v6" ]] && info "检测到本机公网 IPv6：${public_v6}"
+
+  for address in "${addresses[@]}"; do
+    if [[ "$address" == *:* ]]; then
+      expected="$public_v6"
+    else
+      expected="$public_v4"
+    fi
+    if [[ -z "$expected" ]]; then
+      warn "无法从本机验证域名地址 ${address} 对应的 IP 协议；请确认没有失效的 A/AAAA 记录。"
+      continue
+    fi
+    [[ "$address" == "$expected" ]] ||
+      die "域名 ${DOMAIN} 解析到 ${address}，但本机公网地址是 ${expected}。请关闭 Cloudflare 小黄云并修正 DNS。"
+    verified=1
+  done
+
+  if [[ "$verified" -eq 0 ]]; then
+    warn "未能自动比对域名与公网地址；脚本会继续，但 ACME 可能失败。"
+  else
+    info "域名解析与本机公网地址一致。"
+  fi
+}
+
+preflight_ports() {
+  local current_hysteria_start="${1:-}"
+  local current_hysteria_end="${2:-${1:-}}"
+  local acme_port port local_address
+  local -a conflicts=()
+  declare -A occupied_udp=()
+
+  if [[ "$ACME_TYPE" == "http" ]]; then
+    acme_port=80
+  else
+    acme_port=443
+  fi
+  if ss -H -lnt | awk -v target="$acme_port" '
+    {
+      address = $4
+      sub(/^.*:/, "", address)
+      if (address == target) {
+        found = 1
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  '; then
+    die "ACME ${ACME_TYPE} 验证需要 TCP ${acme_port}，但该端口已被其他程序监听。"
+  fi
+
+  while IFS= read -r local_address; do
+    port="${local_address##*:}"
+    [[ "$port" =~ ^[0-9]+$ ]] && occupied_udp["$port"]=1
+  done < <(ss -H -lun | awk '{ print $4 }')
+
+  if [[ "$PORT_MODE" == "single" ]]; then
+    if [[ -n "${occupied_udp[$PORT]:-}" ]] &&
+      ! {
+        [[ "$current_hysteria_start" =~ ^[0-9]+$ &&
+          "$current_hysteria_end" =~ ^[0-9]+$ ]] &&
+          ((PORT >= current_hysteria_start && PORT <= current_hysteria_end))
+      }; then
+      conflicts+=("$PORT")
+    fi
+  else
+    for ((port = HOP_START; port <= HOP_END; port++)); do
+      if [[ -n "${occupied_udp[$port]:-}" ]] &&
+        ! {
+          [[ "$current_hysteria_start" =~ ^[0-9]+$ &&
+            "$current_hysteria_end" =~ ^[0-9]+$ ]] &&
+            ((port >= current_hysteria_start && port <= current_hysteria_end))
+        }; then
+        conflicts+=("$port")
+        (("${#conflicts[@]}" >= 5)) && break
+      fi
+    done
+  fi
+  if (("${#conflicts[@]}" > 0)); then
+    die "请求的 Hy2 UDP 端口已被其他程序监听：${conflicts[*]}。请更换端口或先处理冲突。"
+  fi
+
+  info "端口预检查通过：ACME 使用 TCP ${acme_port}；Hy2 使用 UDP。"
+}
+
 prompt_install_values() {
   local non_interactive="$1"
   local answer=""
@@ -786,6 +953,8 @@ validate_install_values() {
   validate_domain "$DOMAIN" || die "域名格式无效：$DOMAIN"
   [[ -n "$EMAIL" ]] || die "缺少 --email。"
   validate_email "$EMAIL" || die "邮箱格式无效：$EMAIL"
+  validate_acme_type "$ACME_TYPE" ||
+    die "ACME 验证方式只能是 http 或 tls。"
   case "$PORT_MODE" in
     single)
       validate_port "$PORT" || die "端口必须在 1-65535 之间。"
@@ -837,6 +1006,7 @@ load_existing_settings() {
   # This file is generated by this script and is writable only by root.
   # shellcheck disable=SC1090
   source "$SETTINGS_PATH"
+  ACME_TYPE="${ACME_TYPE:-http}"
   PORT_MODE="${PORT_MODE:-single}"
   HOP_START="${HOP_START:-50000}"
   HOP_END="${HOP_END:-50500}"
@@ -855,6 +1025,7 @@ save_settings() {
   if ! {
     printf 'DOMAIN=%q\n' "$DOMAIN"
     printf 'EMAIL=%q\n' "$EMAIL"
+    printf 'ACME_TYPE=%q\n' "$ACME_TYPE"
     printf 'PORT=%q\n' "$PORT"
     printf 'PORT_MODE=%q\n' "$PORT_MODE"
     printf 'HOP_START=%q\n' "$HOP_START"
@@ -1116,7 +1287,8 @@ write_config() {
     printf '  domains:\n'
     printf '    - "%s"\n' "$DOMAIN"
     printf '  email: "%s"\n' "$EMAIL"
-    printf '  dir: "%s/acme"\n\n' "$STATE_DIR"
+    printf '  dir: "%s/acme"\n' "$STATE_DIR"
+    printf '  type: "%s"\n\n' "$ACME_TYPE"
     printf 'auth:\n'
     printf '  type: password\n'
     printf '  password: "%s"\n\n' "$PASSWORD"
@@ -1204,6 +1376,7 @@ REPORT_MINUTE = 0
 MONTHLY_REPORT_MINUTE = 5
 TRAFFIC_DAY_RETENTION = 70
 MAX_INTERFACES = 16
+MAX_JOURNAL_BUFFER = 2 * 1024 * 1024
 
 state_dir = Path(os.environ.get("STATE_DIRECTORY", "/var/lib/hy2-safe-notifier"))
 state_path = state_dir / "state.json"
@@ -2242,7 +2415,7 @@ def flush_outbox(
     return now + (2 if state["outbox"] else 0)
 
 
-def start_journal() -> subprocess.Popen[str]:
+def start_journal(use_saved_cursor: bool = True) -> tuple[subprocess.Popen[bytes], bool]:
     args = [
         "/usr/bin/journalctl",
         "--no-pager",
@@ -2250,23 +2423,58 @@ def start_journal() -> subprocess.Popen[str]:
         "--output=json",
         "--unit=hysteria-server.service",
     ]
-    try:
-        cursor = cursor_path.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        cursor = ""
+    cursor = ""
+    if use_saved_cursor:
+        try:
+            cursor = cursor_path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            pass
     if cursor:
         args.append(f"--after-cursor={cursor}")
     else:
         args.append("--since=now")
-    return subprocess.Popen(
+    process = subprocess.Popen(
         args,
         stdout=subprocess.PIPE,
         stderr=None,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
+        text=False,
+        bufsize=0,
     )
+    if process.stdout is None:
+        raise RuntimeError("journalctl stdout is unavailable")
+    os.set_blocking(process.stdout.fileno(), False)
+    return process, bool(cursor)
+
+
+def drain_journal(
+    process: subprocess.Popen[bytes], buffer: bytes
+) -> tuple[bytes, list[dict[str, Any]], bool]:
+    if process.stdout is None:
+        raise RuntimeError("journalctl stdout is unavailable")
+    entries: list[dict[str, Any]] = []
+    eof = False
+    while True:
+        try:
+            chunk = os.read(process.stdout.fileno(), 65536)
+        except BlockingIOError:
+            break
+        if not chunk:
+            eof = True
+            break
+        buffer += chunk
+        while b"\n" in buffer:
+            raw, buffer = buffer.split(b"\n", 1)
+            if not raw:
+                continue
+            try:
+                entry = json.loads(raw.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(entry, dict):
+                entries.append(entry)
+        if len(buffer) > MAX_JOURNAL_BUFFER:
+            raise RuntimeError("journalctl produced an oversized unterminated record")
+    return buffer, entries, eof
 
 
 manual_report_requested = False
@@ -2287,9 +2495,8 @@ def main() -> int:
     sample_traffic(state, config, now)
     atomic_write_json(state_path, state)
     next_sample = now + TRAFFIC_SAMPLE_SECONDS
-    process = start_journal()
-    if process.stdout is None:
-        raise RuntimeError("journalctl stdout is unavailable")
+    process, cursor_used = start_journal()
+    journal_buffer = b""
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
     retry_after = 0.0
@@ -2297,15 +2504,8 @@ def main() -> int:
     while True:
         events = selector.select(timeout=TICK_SECONDS)
         if events:
-            line = process.stdout.readline()
-            if not line:
-                if process.poll() is not None:
-                    raise RuntimeError(f"journalctl exited with status {process.returncode}")
-            else:
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    entry = {}
+            journal_buffer, entries, eof = drain_journal(process, journal_buffer)
+            for entry in entries:
                 connection = extract_connection(entry)
                 if connection is not None:
                     process_connection(state, config, *connection)
@@ -2313,6 +2513,19 @@ def main() -> int:
                 if isinstance(cursor, str) and cursor:
                     atomic_write_text(cursor_path, cursor + "\n")
                 atomic_write_json(state_path, state)
+            if eof and process.poll() is not None:
+                selector.unregister(process.stdout)
+                process.stdout.close()
+                if cursor_used:
+                    log("保存的 journal 游标已失效，改为从当前日志位置继续。")
+                    cursor_path.unlink(missing_ok=True)
+                    process, cursor_used = start_journal(use_saved_cursor=False)
+                    journal_buffer = b""
+                    selector.register(process.stdout, selectors.EVENT_READ)
+                else:
+                    raise RuntimeError(
+                        f"journalctl exited with status {process.returncode}"
+                    )
 
         now = time.time()
         if now >= next_sample or manual_report_requested:
@@ -2491,9 +2704,58 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
+  cat >"$HEALTH_SERVICE_PATH" <<EOF
+[Unit]
+Description=Check the Hysteria 2 ACME certificate
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${MANAGER_PATH} certificate-check --quiet
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+EOF
+
+  cat >"$HEALTH_TIMER_PATH" <<'EOF'
+[Unit]
+Description=Daily Hysteria 2 certificate health check
+
+[Timer]
+OnCalendar=*-*-* 09:00
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
   write_notifier_script
   write_notifier_unit
-  chmod 0644 "$SERVICE_PATH" "$UPDATE_SERVICE_PATH" "$UPDATE_TIMER_PATH"
+  chmod 0644 \
+    "$SERVICE_PATH" \
+    "$UPDATE_SERVICE_PATH" \
+    "$UPDATE_TIMER_PATH" \
+    "$HEALTH_SERVICE_PATH" \
+    "$HEALTH_TIMER_PATH"
   systemctl daemon-reload
 }
 
@@ -2503,6 +2765,10 @@ configure_update_timer() {
   else
     systemctl disable --now "$TIMER_NAME" >/dev/null 2>&1 || true
   fi
+}
+
+configure_health_timer() {
+  systemctl enable --now "$HEALTH_TIMER_NAME"
 }
 
 refresh_managed_runtime() {
@@ -2516,6 +2782,7 @@ refresh_managed_runtime() {
   write_systemd_units
   flock -u 8
   configure_update_timer
+  configure_health_timer
   info "管理脚本、服务账号权限和 systemd 单元已同步到当前版本。"
 }
 
@@ -2796,6 +3063,122 @@ if not result.get("ok"):
 PY
 }
 
+send_telegram_system_event() {
+  local event="$1"
+  local detail="${2:-}"
+  [[ -f "$NOTIFIER_CONFIG_PATH" && ! -L "$NOTIFIER_CONFIG_PATH" ]] || return 0
+  [[ "$(stat -c '%u:%a' -- "$NOTIFIER_CONFIG_PATH" 2>/dev/null || true)" == "0:600" ]] ||
+    return 0
+  python3 - "$NOTIFIER_CONFIG_PATH" "$event" "$detail" <<'PY'
+import html
+import json
+import sys
+import urllib.parse
+import urllib.request
+
+config_path, event, detail = sys.argv[1:]
+with open(config_path, "r", encoding="utf-8") as handle:
+    config = json.load(handle)
+token = config["token"]
+chat_id = str(config["chat_id"])
+display_name = html.escape(str(config.get("display_name", "Hy2 节点")))
+messages = {
+    "update-failed": (
+        "<b>❌ Hysteria 自动更新失败</b>",
+        "本次更新没有完成；原服务会保持或尝试回滚到旧版本。\n"
+        "请登录 VPS 运行 <code>systemctl status hy2-safe-update.service</code>。",
+        False,
+    ),
+    "update-success": (
+        "<b>✅ Hysteria 更新完成</b>",
+        f"当前核心版本　<code>{html.escape(detail)}</code>",
+        True,
+    ),
+    "certificate-warning": (
+        "<b>⚠️ Hy2 证书需要检查</b>",
+        "没有找到与节点域名匹配且有效期超过 21 天的证书。\n"
+        "请检查域名解析、ACME 端口和 <code>journalctl -u hysteria-server.service</code>。",
+        False,
+    ),
+}
+if event not in messages:
+    raise SystemExit("unsupported system event")
+title, body, silent = messages[event]
+text = "\n".join([title, f"🏷️ 节点　<b>{display_name}</b>", "", body])
+url = f"https://api.telegram.org/bot{token}/sendMessage"
+data = urllib.parse.urlencode(
+    {
+        "chat_id": chat_id,
+        "text": text[:4096],
+        "parse_mode": "HTML",
+        "disable_notification": "true" if silent else "false",
+        "protect_content": "true",
+    }
+).encode("utf-8")
+request = urllib.request.Request(url, data=data, method="POST")
+try:
+    with urllib.request.urlopen(request, timeout=15) as response:
+        raw = response.read(1_048_577)
+except Exception:
+    raise SystemExit(1) from None
+if len(raw) > 1_048_576:
+    raise SystemExit(1)
+try:
+    result = json.loads(raw.decode("utf-8"))
+except (UnicodeDecodeError, json.JSONDecodeError):
+    raise SystemExit(1) from None
+if not result.get("ok"):
+    raise SystemExit(1)
+PY
+}
+
+command_certificate_check() {
+  local certificate quiet=0 matching=0 healthy=0
+  local -a certificates=()
+  require_root
+  load_existing_settings || die "请先安装 Hy2。"
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --quiet)
+        quiet=1
+        QUIET=1
+        shift
+        ;;
+      -h | --help)
+        printf '用法：hy2-safe certificate-check [--quiet]\n'
+        return
+        ;;
+      *) die "certificate-check 的未知选项：$1" ;;
+    esac
+  done
+
+  if [[ -d "${STATE_DIR}/acme" && ! -L "${STATE_DIR}/acme" ]]; then
+    mapfile -d '' -t certificates < <(
+      find "${STATE_DIR}/acme" -xdev -type f -name '*.crt' -print0 2>/dev/null
+    )
+  fi
+  for certificate in "${certificates[@]}"; do
+    if openssl x509 -in "$certificate" -noout -checkhost "$DOMAIN" >/dev/null 2>&1; then
+      matching=1
+      if openssl x509 -in "$certificate" -noout -checkend 1814400 >/dev/null 2>&1; then
+        healthy=1
+        break
+      fi
+    fi
+  done
+
+  if [[ "$healthy" -eq 1 ]]; then
+    [[ "$quiet" -eq 1 ]] || info "ACME 证书与 ${DOMAIN} 匹配，且有效期超过 21 天。"
+    return
+  fi
+  if [[ "$matching" -eq 1 ]]; then
+    warn "与 ${DOMAIN} 匹配的证书将在 21 天内到期或已经到期。"
+  else
+    warn "没有找到与 ${DOMAIN} 匹配的 ACME 证书。"
+  fi
+  send_telegram_system_event certificate-warning || true
+}
+
 configure_notifier_service() {
   if [[ "${TELEGRAM_ENABLED:-0}" -eq 1 ]]; then
     if [[ ! -f "$NOTIFIER_CONFIG_PATH" ]]; then
@@ -2831,6 +3214,11 @@ parse_config_options() {
       --email)
         [[ "$#" -ge 2 ]] || die "--email 缺少参数。"
         EMAIL="$2"
+        shift 2
+        ;;
+      --acme-type)
+        [[ "$#" -ge 2 ]] || die "--acme-type 缺少参数。"
+        ACME_TYPE="${2,,}"
         shift 2
         ;;
       --port)
@@ -2970,7 +3358,7 @@ EOF
 }
 
 command_install() {
-  local install_arg
+  local install_arg acme_port
   require_root
   require_systemd
   require_supported_os
@@ -2993,6 +3381,7 @@ command_install() {
   else
     DOMAIN=""
     EMAIL=""
+    ACME_TYPE="http"
     PORT="443"
     PORT_MODE="range"
     HOP_START="50000"
@@ -3014,8 +3403,12 @@ command_install() {
   prompt_install_values "$NON_INTERACTIVE"
   validate_install_values
   ensure_port_hopping_backend
-  if ! getent ahosts "$DOMAIN" >/dev/null 2>&1; then
-    warn "当前未能解析 ${DOMAIN}。ACME 只有在域名正确解析到本 VPS 后才能签发证书。"
+  preflight_domain
+  preflight_ports
+  if [[ "$ACME_TYPE" == "http" ]]; then
+    acme_port=80
+  else
+    acme_port=443
   fi
 
   exec 9>"$LOCK_PATH"
@@ -3029,11 +3422,12 @@ command_install() {
   save_settings
   write_systemd_units
   configure_update_timer
+  configure_health_timer
 
   systemctl enable "$SERVICE_NAME"
   if ! systemctl restart "$SERVICE_NAME" || ! wait_for_service; then
     journalctl --no-pager -n 40 -u "$SERVICE_NAME" >&2 || true
-    die "Hysteria 服务启动失败。最常见原因是域名未正确解析、TCP 80/443 未放行或端口冲突。"
+    die "Hysteria 服务启动失败。请检查域名解析、TCP ${acme_port}、UDP 端口和服务日志。"
   fi
   if [[ "$TELEGRAM_ENABLED" -eq 1 ]]; then
     configure_notifier_service ||
@@ -3044,10 +3438,11 @@ command_install() {
   printf '\n'
   show_client
   if [[ "$PORT_MODE" == "range" ]]; then
-    printf '\n请确认防火墙/安全组已放行：UDP %s-%s，以及 ACME 所需的 TCP 80/443。\n' \
-      "$HOP_START" "$HOP_END"
+    printf '\n请确认防火墙/安全组已放行：UDP %s-%s，以及 ACME 所需的 TCP %s。\n' \
+      "$HOP_START" "$HOP_END" "$acme_port"
   else
-    printf '\n请确认防火墙/安全组已放行：UDP %s，以及 ACME 所需的 TCP 80/443。\n' "$PORT"
+    printf '\n请确认防火墙/安全组已放行：UDP %s，以及 ACME 所需的 TCP %s。\n' \
+      "$PORT" "$acme_port"
   fi
   if [[ "$NON_INTERACTIVE" -eq 0 && "$TELEGRAM_ENABLED" -eq 0 ]]; then
     printf '\nTelegram 提醒是可选功能；设置失败不会影响已经运行的 Hy2。\n'
@@ -3063,15 +3458,26 @@ command_install() {
 }
 
 command_configure() {
-  local old_auto_update
+  local old_auto_update old_udp_start="" old_udp_end=""
   require_root
   require_systemd
   load_existing_settings || die "请先执行 install。"
   old_auto_update="$AUTO_UPDATE"
+  if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+    if [[ "$PORT_MODE" == "range" ]]; then
+      old_udp_start="$HOP_START"
+      old_udp_end="$HOP_END"
+    else
+      old_udp_start="$PORT"
+      old_udp_end="$PORT"
+    fi
+  fi
   parse_config_options "$@"
   prompt_install_values "$NON_INTERACTIVE"
   validate_install_values
   ensure_port_hopping_backend
+  preflight_domain
+  preflight_ports "$old_udp_start" "$old_udp_end"
 
   exec 9>"$LOCK_PATH"
   flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
@@ -3086,6 +3492,7 @@ command_configure() {
   save_settings
   write_systemd_units
   configure_update_timer
+  configure_health_timer
   if ! systemctl restart "$SERVICE_NAME" || ! wait_for_service; then
     warn "新配置启动失败，正在恢复上一份配置。"
     cp --preserve=mode,ownership,timestamps -- "${TMP_ROOT}/config.yaml" "$CONFIG_PATH"
@@ -3095,6 +3502,7 @@ command_configure() {
     systemctl daemon-reload
     AUTO_UPDATE="$old_auto_update"
     configure_update_timer
+    configure_health_timer
     systemctl restart "$SERVICE_NAME" || true
     wait_for_service || warn "恢复配置后服务仍未启动，请检查日志。"
     journalctl --no-pager -n 40 -u "$SERVICE_NAME" >&2 || true
@@ -3411,10 +3819,12 @@ command_telegram_disable() {
 }
 
 command_update() {
+  local before_version after_version
   require_root
   require_systemd
   [[ -f "$SETTINGS_PATH" ]] || die "未检测到 hy2-safe 管理的安装，拒绝更新未知实例。"
   validate_root_secret_file "$SETTINGS_PATH" "hy2-safe 设置文件"
+  load_existing_settings || die "无法读取 hy2-safe 设置。"
   command_verify_service_account
   install_manager_copy
   while [[ "$#" -gt 0 ]]; do
@@ -3433,8 +3843,55 @@ command_update() {
 
   exec 9>"$LOCK_PATH"
   flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  before_version="$(installed_version || true)"
+  FAILURE_EVENT="update-failed"
   fetch_verified_release
   install_fetched_binary 1
+  FAILURE_EVENT=""
+  after_version="$(installed_version || true)"
+  if [[ -n "$after_version" && "$after_version" != "$before_version" ]]; then
+    send_telegram_system_event update-success "$after_version" || true
+  fi
+}
+
+command_rotate_password() {
+  local answer="" old_password
+  require_root
+  require_systemd
+  load_existing_settings || die "请先安装 Hy2。"
+  [[ -t 0 ]] || die "密码轮换必须在交互式终端中执行。"
+
+  printf '此操作会生成全新的高强度 Hy2 密码，现有客户端会立即失效。\n'
+  prompt_input "确认继续请输入 ROTATE: " answer
+  [[ "$answer" == "ROTATE" ]] || {
+    info "已取消密码轮换，没有修改任何内容。"
+    return
+  }
+
+  exec 9>"$LOCK_PATH"
+  flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  ensure_service_user_and_directories
+  TMP_ROOT="$(mktemp -d /tmp/hy2-safe.XXXXXXXX)"
+  cp --preserve=mode,ownership,timestamps -- "$CONFIG_PATH" "${TMP_ROOT}/config.yaml"
+  cp --preserve=mode,ownership,timestamps -- "$SETTINGS_PATH" "${TMP_ROOT}/hy2-safe.env"
+  old_password="$PASSWORD"
+  PASSWORD="$(random_password)"
+  validate_password "$PASSWORD" || die "生成的新密码没有通过内部格式检查。"
+  [[ "$PASSWORD" != "$old_password" ]] || die "新密码意外与旧密码相同，拒绝继续。"
+
+  if ! write_config || ! save_settings ||
+    ! systemctl restart "$SERVICE_NAME" || ! wait_for_service; then
+    warn "新密码没有成功启用，正在恢复旧配置。"
+    cp --preserve=mode,ownership,timestamps -- "${TMP_ROOT}/config.yaml" "$CONFIG_PATH"
+    cp --preserve=mode,ownership,timestamps -- "${TMP_ROOT}/hy2-safe.env" "$SETTINGS_PATH"
+    systemctl restart "$SERVICE_NAME" || true
+    wait_for_service || warn "恢复旧密码后服务仍未正常运行，请检查日志。"
+    die "密码轮换失败，已恢复原密码。"
+  fi
+  configure_notifier_service ||
+    warn "Hy2 密码已经轮换，但 Telegram 提醒服务未能重新启动；请运行 hy2-safe telegram-logs。"
+  info "Hy2 密码已安全轮换，旧客户端配置已经失效。"
+  show_client
 }
 
 command_verify_service_account() {
@@ -3466,6 +3923,11 @@ command_status() {
     systemctl list-timers --no-pager "$TIMER_NAME" || true
   else
     printf '每周自动更新：未开启\n'
+  fi
+  if systemctl is-enabled --quiet "$HEALTH_TIMER_NAME" 2>/dev/null; then
+    printf '证书健康检查：已开启（每天检查，证书不足 21 天时告警）\n'
+  else
+    printf '证书健康检查：未开启或尚未同步到当前版本\n'
   fi
   if [[ "${TELEGRAM_ENABLED:-0}" -eq 1 ]]; then
     printf 'Telegram 消息名称：%s\n' "$TELEGRAM_NAME"
@@ -3555,6 +4017,7 @@ command_uninstall() {
 
   systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
   systemctl disable --now "$TIMER_NAME" >/dev/null 2>&1 || true
+  systemctl disable --now "$HEALTH_TIMER_NAME" >/dev/null 2>&1 || true
   systemctl disable --now "$NOTIFIER_NAME" >/dev/null 2>&1 || true
   systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null &&
     die "Hysteria 服务仍在运行，拒绝继续卸载。"
@@ -3580,6 +4043,8 @@ command_uninstall() {
     "$SERVICE_PATH" \
     "$UPDATE_SERVICE_PATH" \
     "$UPDATE_TIMER_PATH" \
+    "$HEALTH_SERVICE_PATH" \
+    "$HEALTH_TIMER_PATH" \
     "$NOTIFIER_SERVICE_PATH" \
     "$BIN_PATH" \
     "$PREVIOUS_BIN_PATH" \
@@ -3601,6 +4066,7 @@ command_uninstall() {
   systemctl reset-failed \
     "$SERVICE_NAME" \
     hy2-safe-update.service \
+    hy2-safe-health.service \
     "$NOTIFIER_NAME" >/dev/null 2>&1 || true
 
   info "Hy2 程序、配置、证书、密码、Telegram Token 和通知状态已完整删除。"
@@ -3639,9 +4105,10 @@ command_menu() {
   menu_item "9" "查看版本、服务和自动更新状态"
   menu_item "10" "立即发送 Telegram 流量报告"
   menu_item "11" "设置 Telegram 消息名称"
+  menu_item "12" "一键重置 Hy2 密码"
   menu_item "0" "退出"
   printf '\n'
-  prompt_input "请输入菜单编号 [0-11]: " choice
+  prompt_input "请输入菜单编号 [0-12]: " choice
   case "$choice" in
     1)
       if [[ -f "$SETTINGS_PATH" ]]; then
@@ -3685,6 +4152,10 @@ command_menu() {
       refresh_managed_runtime
       command_telegram_name
       ;;
+    12)
+      refresh_managed_runtime
+      command_rotate_password
+      ;;
     0) info "已退出。" ;;
     *) die "无效选项：$choice" ;;
   esac
@@ -3706,6 +4177,8 @@ main() {
     install) command_install "$@" ;;
     configure) command_configure "$@" ;;
     update) command_update "$@" ;;
+    rotate-password) command_rotate_password "$@" ;;
+    certificate-check) command_certificate_check "$@" ;;
     show-client) show_client "$@" ;;
     status) command_status "$@" ;;
     version | -V | --version) command_version ;;
@@ -3724,4 +4197,6 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${HY2_SAFE_SOURCE_ONLY:-0}" != "1" ]]; then
+  main "$@"
+fi

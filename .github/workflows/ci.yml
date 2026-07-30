@@ -26,3 +26,30 @@ jobs:
 
       - name: Run project static checks
         run: python3 tests/static_checks.py
+
+  debian:
+    name: Debian ${{ matrix.version }} smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["12", "13"]
+    container:
+      image: debian:${{ matrix.version }}-slim
+
+    steps:
+      - name: Install test dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bash ca-certificates openssl python3 shellcheck
+
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Validate on Debian
+        run: |
+          bash -n hy2-safe.sh tests/debian_smoke.sh
+          shellcheck --severity=warning hy2-safe.sh tests/debian_smoke.sh
+          bash tests/debian_smoke.sh
+          python3 tests/static_checks.py
