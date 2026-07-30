@@ -15,7 +15,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.0.3"
+readonly PROGRAM_VERSION="1.0.4"
 readonly REPOSITORY="apernet/hysteria"
 readonly API_URL="https://api.github.com/repos/${REPOSITORY}/releases/latest"
 readonly RELEASE_URL="https://github.com/${REPOSITORY}/releases/download"
@@ -1266,16 +1266,38 @@ def hidden_ip_group(
     return f"v6:{network.network_address}/48", ":".join(pieces) + ":*"
 
 
+def decode_journal_message(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value
+    # journalctl represents fields containing control/binary bytes as integer
+    # arrays in JSON output. Hysteria's ANSI-colored logs therefore arrive in
+    # this form on some systemd versions even though the text itself is UTF-8.
+    if (
+        isinstance(value, list)
+        and len(value) <= 1_048_576
+        and all(
+            isinstance(item, int)
+            and not isinstance(item, bool)
+            and 0 <= item <= 255
+            for item in value
+        )
+    ):
+        return bytes(value).decode("utf-8", errors="replace")
+    return None
+
+
 def extract_connection(entry: dict[str, Any]) -> tuple[str, float] | None:
-    message = entry.get("MESSAGE")
-    if not isinstance(message, str) or "client connected" not in message:
+    message = decode_journal_message(entry.get("MESSAGE"))
+    if message is None or "client connected" not in message:
         return None
     start = message.find("{", message.find("client connected"))
     if start < 0:
         return None
     try:
-        fields = json.loads(message[start:])
-    except json.JSONDecodeError:
+        fields, _ = json.JSONDecoder().raw_decode(message[start:])
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(fields, dict):
         return None
     address = fields.get("addr")
     if not isinstance(address, str):
