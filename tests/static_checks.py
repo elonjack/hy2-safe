@@ -21,7 +21,7 @@ def forbid(pattern: str, message: str) -> None:
 
 
 require(r"^set -Eeuo pipefail$", "strict Bash mode is required")
-require(r'PROGRAM_VERSION="1\.0\.7"', "the release must expose its manager version")
+require(r'PROGRAM_VERSION="1\.0\.8"', "the release must expose its manager version")
 require(r"require_supported_os", "installations must be limited to Debian 12/13")
 require(r"sha256sum", "release binaries must be checksum-verified")
 require(r"release_asset_field", "release metadata must be parsed structurally")
@@ -135,8 +135,18 @@ require(r"管理脚本、服务账号权限和 systemd 单元已同步", "runtim
 require(r"当前 Hysteria 2 版本", "status output must show the installed Hysteria version first")
 require(r"OnCalendar=weekly", "automatic updates must run weekly")
 require(r"Persistent=true", "missed automatic update runs must be caught up")
-require(r'printf \'  type: "%s"\\n\\n\' "\$ACME_TYPE"', "ACME challenge type must be explicit")
+require(r'printf \'  type: "%s"\\n\' "\$ACME_TYPE"', "ACME challenge type must be explicit")
 require(r'ACME_TYPE="http"', "fresh installs must default to HTTP-01 on TCP 80 only")
+require(r"http \| tls \| dns", "Cloudflare DNS-01 must be an explicit ACME mode")
+require(r"name: cloudflare", "DNS-01 must use Hysteria's official Cloudflare provider")
+require(r"cloudflare_api_token:", "the generated Hysteria config must carry the provider token")
+require(r"--cloudflare-token-file FILE", "automation must read Cloudflare tokens from a file")
+require(r"validate_cloudflare_token_file", "Cloudflare token files must be root-only")
+require(r"请输入 Cloudflare API Token（输入时不会显示）", "interactive token input must be hidden")
+require(r"/user/tokens/verify", "Cloudflare tokens must be active before configuration")
+require(r'"/zones"', "Cloudflare tokens must be scoped to the domain's zone")
+require(r"DNS-01 不需要入站 TCP 端口", "DNS-01 must skip inbound ACME port checks")
+require(r'CLOUDFLARE_API_TOKEN=""', "leaving DNS-01 must remove the retained token")
 require(r"preflight_domain", "install and configure must preflight public DNS")
 require(r"preflight_ports", "install and configure must preflight TCP/UDP conflicts")
 require(r"ss -H -lnt", "ACME TCP conflicts must be detected before changes")
@@ -197,6 +207,7 @@ forbid(r"www\.bing\.com", "third-party self-signed identities are forbidden")
 forbid(r"curl[^\n]*\|\s*(?:ba)?sh", "download-and-execute pipelines are forbidden")
 forbid(r"MASQUERADE_DIR", "the fixed default masquerade must not expose a writable directory")
 forbid(r"--telegram-token(?:\s|=)", "Bot tokens must never be accepted on the command line")
+forbid(r"--cloudflare-token(?:\s|=)", "Cloudflare tokens must never be accepted as command-line values")
 forbid(r"--password(?:\s+PASSWORD|\))", "Hy2 passwords must never be accepted in command-line arguments")
 forbid(r"userdel\s+(?:-[a-zA-Z]*r[a-zA-Z]*|--remove)\s+hysteria", "userdel must not recursively follow the home path")
 
@@ -532,7 +543,7 @@ if README.count("```") % 2:
     raise AssertionError("README fenced code blocks must be balanced")
 if "[!IMPORTANT]" not in README or "[!WARNING]" not in README:
     raise AssertionError("README must make the main safety warnings prominent")
-if "hy2-safe v1.0.7 · Hysteria 2 管理菜单" not in README:
+if "hy2-safe v1.0.8 · Hysteria 2 管理菜单" not in README:
     raise AssertionError("README menu version must match the release")
 if "/etc/hysteria/hy2-safe-account.env" not in README:
     raise AssertionError("README must explain the account ownership record")

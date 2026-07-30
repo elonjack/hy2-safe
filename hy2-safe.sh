@@ -15,7 +15,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.0.7"
+readonly PROGRAM_VERSION="1.0.8"
 readonly REPOSITORY="apernet/hysteria"
 readonly API_URL="https://api.github.com/repos/${REPOSITORY}/releases/latest"
 readonly RELEASE_URL="https://github.com/${REPOSITORY}/releases/download"
@@ -180,7 +180,9 @@ usage() {
 install/configure 选项：
   --domain DOMAIN            证书/SNI 域名，必须解析到本机
   --email EMAIL              ACME 证书通知邮箱
-  --acme-type http|tls       ACME 验证方式；默认 http（只需要 TCP 80）
+  --acme-type http|tls|dns   ACME 验证方式；默认 http，dns 使用 Cloudflare
+  --cloudflare-token-file FILE
+                             从 root-only 文件读取 Cloudflare API Token
   --port PORT                使用单 UDP 端口（关闭端口跳跃）
   --port-hopping START-END   使用原生端口跳跃范围，默认 50000-50500
   --hop-min SECONDS          随机跳跃最短间隔，默认 15 秒
@@ -204,7 +206,8 @@ install/configure 选项：
   - 当前版本只支持 Debian 12/13。
   - 不会清空现有防火墙链，也不会修改 UFW、firewalld 或云安全组。
   - 端口跳跃会让 Hysteria 原生创建并在停止时清理自己的 nftables/iptables 临时规则。
-  - 默认 ACME HTTP-01 只需要 TCP 80；选择 tls 时只需要 TCP 443。
+  - 默认 ACME HTTP-01 只需要 TCP 80；tls 只需要 TCP 443；dns 不需要入站 TCP 端口。
+  - Cloudflare Token 不接受命令行明文，只能隐藏输入或从 root-only 文件读取。
   - Telegram 提醒默认关闭；启用后只向设置时确认的私人 Chat ID 发消息。
   - 完整卸载会删除 Hy2 配置、证书和 Telegram Token，无法撤销。
   - 交互终端默认启用颜色；设置 NO_COLOR=1 可关闭彩色输出。
@@ -584,7 +587,7 @@ validate_port() {
 
 validate_acme_type() {
   case "$1" in
-    http | tls) return 0 ;;
+    http | tls | dns) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -624,6 +627,85 @@ validate_telegram_token() {
   local token="$1"
   (("${#token}" >= 20 && "${#token}" <= 200)) || return 1
   [[ "$token" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]]
+}
+
+validate_cloudflare_token() {
+  local token="$1"
+  (("${#token}" >= 20 && "${#token}" <= 200)) || return 1
+  [[ "$token" =~ ^[A-Za-z0-9_-]+$ ]]
+}
+
+validate_cloudflare_token_file() {
+  validate_root_secret_file "$1" "Cloudflare API Token 文件"
+}
+
+verify_cloudflare_token_access() {
+  local zone
+  zone="$(
+    python3 /dev/fd/3 "$DOMAIN" 3<<'PY' <<<"$CLOUDFLARE_API_TOKEN"
+import json
+import sys
+import urllib.parse
+import urllib.request
+
+domain = sys.argv[1].lower()
+token = sys.stdin.read(4096).strip()
+
+
+def call(path, query=None):
+    url = "https://api.cloudflare.com/client/v4" + path
+    if query:
+        url += "?" + urllib.parse.urlencode(query)
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": "hy2-safe",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read(1_048_577)
+    except Exception:
+        raise SystemExit(1) from None
+    if len(raw) > 1_048_576:
+        raise SystemExit(1)
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise SystemExit(1) from None
+    if not isinstance(value, dict) or value.get("success") is not True:
+        raise SystemExit(1)
+    return value.get("result")
+
+
+verification = call("/user/tokens/verify")
+if not isinstance(verification, dict) or verification.get("status") != "active":
+    raise SystemExit(1)
+labels = domain.split(".")
+matched_zone = ""
+for index in range(max(1, len(labels) - 1)):
+    candidate = ".".join(labels[index:])
+    zones = call(
+        "/zones",
+        {"name": candidate, "status": "active", "per_page": "1"},
+    )
+    if not isinstance(zones, list):
+        raise SystemExit(1)
+    if any(
+        isinstance(zone, dict)
+        and str(zone.get("name", "")).lower() == candidate
+        for zone in zones
+    ):
+        matched_zone = candidate
+        break
+if not matched_zone:
+    raise SystemExit(1)
+print(matched_zone)
+PY
+  )" || die "Cloudflare Token 验证失败，或它无权读取 ${DOMAIN} 所属的 Zone。"
+  info "Cloudflare Token 有效，并且可以访问 Zone：${zone}"
 }
 
 validate_telegram_chat_id() {
@@ -812,22 +894,25 @@ preflight_ports() {
   local -a conflicts=()
   declare -A occupied_udp=()
 
-  if [[ "$ACME_TYPE" == "http" ]]; then
-    acme_port=80
-  else
-    acme_port=443
-  fi
-  if ss -H -lnt | awk -v target="$acme_port" '
-    {
-      address = $4
-      sub(/^.*:/, "", address)
-      if (address == target) {
-        found = 1
+  case "$ACME_TYPE" in
+    http) acme_port=80 ;;
+    tls) acme_port=443 ;;
+    dns) acme_port="" ;;
+    *) die "内部错误：未知 ACME 类型 ${ACME_TYPE}。" ;;
+  esac
+  if [[ -n "$acme_port" ]]; then
+    if ss -H -lnt | awk -v target="$acme_port" '
+      {
+        address = $4
+        sub(/^.*:/, "", address)
+        if (address == target) {
+          found = 1
+        }
       }
-    }
-    END { exit(found ? 0 : 1) }
-  '; then
-    die "ACME ${ACME_TYPE} 验证需要 TCP ${acme_port}，但该端口已被其他程序监听。"
+      END { exit(found ? 0 : 1) }
+    '; then
+      die "ACME ${ACME_TYPE} 验证需要 TCP ${acme_port}，但该端口已被其他程序监听。"
+    fi
   fi
 
   while IFS= read -r local_address; do
@@ -861,7 +946,11 @@ preflight_ports() {
     die "请求的 Hy2 UDP 端口已被其他程序监听：${conflicts[*]}。请更换端口或先处理冲突。"
   fi
 
-  info "端口预检查通过：ACME 使用 TCP ${acme_port}；Hy2 使用 UDP。"
+  if [[ -n "$acme_port" ]]; then
+    info "端口预检查通过：ACME 使用 TCP ${acme_port}；Hy2 使用 UDP。"
+  else
+    info "端口预检查通过：Cloudflare DNS-01 不需要入站 TCP 端口；Hy2 使用 UDP。"
+  fi
 }
 
 prompt_install_values() {
@@ -876,6 +965,39 @@ prompt_install_values() {
 
   if [[ -z "$EMAIL" && "$non_interactive" -eq 0 ]]; then
     prompt_input "ACME 通知邮箱: " EMAIL
+  fi
+
+  if [[ "$ACME_TYPE_WAS_SET" -eq 0 && "$non_interactive" -eq 0 ]]; then
+    if [[ "$ACME_TYPE" == "dns" ]]; then
+      if prompt_yes_no "继续使用 Cloudflare DNS-01（不需要 TCP 80/443）？" yes; then
+        ACME_TYPE="dns"
+      else
+        ACME_TYPE="http"
+      fi
+    elif prompt_yes_no "改用 Cloudflare DNS-01（不需要 TCP 80/443）？" no; then
+      ACME_TYPE="dns"
+    fi
+  fi
+
+  if [[ "$ACME_TYPE" == "dns" ]]; then
+    if [[ "$CLOUDFLARE_TOKEN_WAS_SET" -eq 0 ]]; then
+      if [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+        if [[ "$non_interactive" -eq 0 ]] &&
+          prompt_yes_no "更换当前 Cloudflare API Token？" no; then
+          prompt_secret "请输入新的 Cloudflare API Token（输入时不会显示）: " \
+            CLOUDFLARE_API_TOKEN
+        fi
+      elif [[ "$non_interactive" -eq 0 ]]; then
+        prompt_secret "请输入 Cloudflare API Token（输入时不会显示）: " \
+          CLOUDFLARE_API_TOKEN
+      else
+        die "DNS-01 缺少 --cloudflare-token-file。"
+      fi
+    fi
+  else
+    [[ "$CLOUDFLARE_TOKEN_WAS_SET" -eq 0 ]] ||
+      die "--cloudflare-token-file 只能与 --acme-type dns 一起使用。"
+    CLOUDFLARE_API_TOKEN=""
   fi
 
   if [[ "$PORT_MODE_WAS_SET" -eq 0 && "$non_interactive" -eq 0 ]]; then
@@ -954,7 +1076,13 @@ validate_install_values() {
   [[ -n "$EMAIL" ]] || die "缺少 --email。"
   validate_email "$EMAIL" || die "邮箱格式无效：$EMAIL"
   validate_acme_type "$ACME_TYPE" ||
-    die "ACME 验证方式只能是 http 或 tls。"
+    die "ACME 验证方式只能是 http、tls 或 dns。"
+  if [[ "$ACME_TYPE" == "dns" ]]; then
+    validate_cloudflare_token "$CLOUDFLARE_API_TOKEN" ||
+      die "Cloudflare API Token 格式无效。"
+  elif [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]]; then
+    die "非 DNS-01 模式不能保留 Cloudflare API Token。"
+  fi
   case "$PORT_MODE" in
     single)
       validate_port "$PORT" || die "端口必须在 1-65535 之间。"
@@ -1003,10 +1131,12 @@ load_existing_settings() {
   [[ -f "$SETTINGS_PATH" ]] || return 1
   validate_root_secret_file "$SETTINGS_PATH" "hy2-safe 设置文件"
   TELEGRAM_NAME=""
+  CLOUDFLARE_API_TOKEN=""
   # This file is generated by this script and is writable only by root.
   # shellcheck disable=SC1090
   source "$SETTINGS_PATH"
   ACME_TYPE="${ACME_TYPE:-http}"
+  CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-}"
   PORT_MODE="${PORT_MODE:-single}"
   HOP_START="${HOP_START:-50000}"
   HOP_END="${HOP_END:-50500}"
@@ -1026,6 +1156,7 @@ save_settings() {
     printf 'DOMAIN=%q\n' "$DOMAIN"
     printf 'EMAIL=%q\n' "$EMAIL"
     printf 'ACME_TYPE=%q\n' "$ACME_TYPE"
+    printf 'CLOUDFLARE_API_TOKEN=%q\n' "$CLOUDFLARE_API_TOKEN"
     printf 'PORT=%q\n' "$PORT"
     printf 'PORT_MODE=%q\n' "$PORT_MODE"
     printf 'HOP_START=%q\n' "$HOP_START"
@@ -1288,7 +1419,14 @@ write_config() {
     printf '    - "%s"\n' "$DOMAIN"
     printf '  email: "%s"\n' "$EMAIL"
     printf '  dir: "%s/acme"\n' "$STATE_DIR"
-    printf '  type: "%s"\n\n' "$ACME_TYPE"
+    printf '  type: "%s"\n' "$ACME_TYPE"
+    if [[ "$ACME_TYPE" == "dns" ]]; then
+      printf '  dns:\n'
+      printf '    name: cloudflare\n'
+      printf '    config:\n'
+      printf '      cloudflare_api_token: "%s"\n' "$CLOUDFLARE_API_TOKEN"
+    fi
+    printf '\n'
     printf 'auth:\n'
     printf '  type: password\n'
     printf '  password: "%s"\n\n' "$PASSWORD"
@@ -3198,6 +3336,8 @@ configure_notifier_service() {
 
 parse_config_options() {
   NON_INTERACTIVE=0
+  ACME_TYPE_WAS_SET=0
+  CLOUDFLARE_TOKEN_WAS_SET=0
   PORT_MODE_WAS_SET=0
   PORT_VALUE_WAS_SET=0
   MASQUERADE_WAS_SET=0
@@ -3219,6 +3359,14 @@ parse_config_options() {
       --acme-type)
         [[ "$#" -ge 2 ]] || die "--acme-type 缺少参数。"
         ACME_TYPE="${2,,}"
+        ACME_TYPE_WAS_SET=1
+        shift 2
+        ;;
+      --cloudflare-token-file)
+        [[ "$#" -ge 2 ]] || die "--cloudflare-token-file 缺少参数。"
+        validate_cloudflare_token_file "$2"
+        CLOUDFLARE_API_TOKEN="$(head -n 1 -- "$2" | tr -d '\r\n')"
+        CLOUDFLARE_TOKEN_WAS_SET=1
         shift 2
         ;;
       --port)
@@ -3358,7 +3506,7 @@ EOF
 }
 
 command_install() {
-  local install_arg acme_port
+  local install_arg acme_requirement
   require_root
   require_systemd
   require_supported_os
@@ -3382,6 +3530,7 @@ command_install() {
     DOMAIN=""
     EMAIL=""
     ACME_TYPE="http"
+    CLOUDFLARE_API_TOKEN=""
     PORT="443"
     PORT_MODE="range"
     HOP_START="50000"
@@ -3404,12 +3553,13 @@ command_install() {
   validate_install_values
   ensure_port_hopping_backend
   preflight_domain
+  [[ "$ACME_TYPE" != "dns" ]] || verify_cloudflare_token_access
   preflight_ports
-  if [[ "$ACME_TYPE" == "http" ]]; then
-    acme_port=80
-  else
-    acme_port=443
-  fi
+  case "$ACME_TYPE" in
+    http) acme_requirement="TCP 80" ;;
+    tls) acme_requirement="TCP 443" ;;
+    dns) acme_requirement="Cloudflare DNS-01（不需要入站 TCP 80/443）" ;;
+  esac
 
   exec 9>"$LOCK_PATH"
   flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
@@ -3427,7 +3577,7 @@ command_install() {
   systemctl enable "$SERVICE_NAME"
   if ! systemctl restart "$SERVICE_NAME" || ! wait_for_service; then
     journalctl --no-pager -n 40 -u "$SERVICE_NAME" >&2 || true
-    die "Hysteria 服务启动失败。请检查域名解析、TCP ${acme_port}、UDP 端口和服务日志。"
+    die "Hysteria 服务启动失败。请检查域名解析、${acme_requirement}、UDP 端口和服务日志。"
   fi
   if [[ "$TELEGRAM_ENABLED" -eq 1 ]]; then
     configure_notifier_service ||
@@ -3437,12 +3587,20 @@ command_install() {
   info "安装完成，服务已作为非特权用户 hysteria 运行。"
   printf '\n'
   show_client
-  if [[ "$PORT_MODE" == "range" ]]; then
-    printf '\n请确认防火墙/安全组已放行：UDP %s-%s，以及 ACME 所需的 TCP %s。\n' \
-      "$HOP_START" "$HOP_END" "$acme_port"
+  if [[ "$ACME_TYPE" == "dns" ]]; then
+    if [[ "$PORT_MODE" == "range" ]]; then
+      printf '\n请确认防火墙/安全组已放行：UDP %s-%s。DNS-01 不需要放行入站 TCP 80/443。\n' \
+        "$HOP_START" "$HOP_END"
+    else
+      printf '\n请确认防火墙/安全组已放行：UDP %s。DNS-01 不需要放行入站 TCP 80/443。\n' \
+        "$PORT"
+    fi
+  elif [[ "$PORT_MODE" == "range" ]]; then
+    printf '\n请确认防火墙/安全组已放行：UDP %s-%s，以及 ACME 所需的 %s。\n' \
+      "$HOP_START" "$HOP_END" "$acme_requirement"
   else
-    printf '\n请确认防火墙/安全组已放行：UDP %s，以及 ACME 所需的 TCP %s。\n' \
-      "$PORT" "$acme_port"
+    printf '\n请确认防火墙/安全组已放行：UDP %s，以及 ACME 所需的 %s。\n' \
+      "$PORT" "$acme_requirement"
   fi
   if [[ "$NON_INTERACTIVE" -eq 0 && "$TELEGRAM_ENABLED" -eq 0 ]]; then
     printf '\nTelegram 提醒是可选功能；设置失败不会影响已经运行的 Hy2。\n'
@@ -3477,6 +3635,7 @@ command_configure() {
   validate_install_values
   ensure_port_hopping_backend
   preflight_domain
+  [[ "$ACME_TYPE" != "dns" ]] || verify_cloudflare_token_access
   preflight_ports "$old_udp_start" "$old_udp_end"
 
   exec 9>"$LOCK_PATH"
@@ -3913,6 +4072,11 @@ command_status() {
   current_version="$(installed_version || printf '未安装')"
   printf 'hy2-safe 管理脚本版本：v%s\n' "$PROGRAM_VERSION"
   printf '当前 Hysteria 2 版本：%s\n' "$current_version"
+  case "${ACME_TYPE:-http}" in
+    http) printf '证书验证：HTTP-01（需要入站 TCP 80）\n' ;;
+    tls) printf '证书验证：TLS-ALPN-01（需要入站 TCP 443）\n' ;;
+    dns) printf '证书验证：Cloudflare DNS-01（不需要入站 TCP 80/443）\n' ;;
+  esac
   if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
     printf 'Hy2 服务：正在运行\n'
   else
@@ -3994,6 +4158,7 @@ command_uninstall() {
   printf '即将永久删除：\n'
   printf '  - Hysteria 2 程序、旧版本、管理脚本和 systemd 服务\n'
   printf '  - Hy2 服务端配置、客户端密码和 ACME 证书\n'
+  printf '  - Cloudflare DNS-01 API Token（如果已经配置）\n'
   printf '  - Telegram Bot Token、通知程序和通知状态\n'
   if [[ "$ownership_recorded" -eq 1 ]] &&
     { [[ "$SERVICE_USER_CREATED" -eq 1 ]] || [[ "$SERVICE_GROUP_CREATED" -eq 1 ]]; }; then
@@ -4069,7 +4234,7 @@ command_uninstall() {
     hy2-safe-health.service \
     "$NOTIFIER_NAME" >/dev/null 2>&1 || true
 
-  info "Hy2 程序、配置、证书、密码、Telegram Token 和通知状态已完整删除。"
+  info "Hy2 程序、配置、证书、密码、Cloudflare/Telegram Token 和通知状态已完整删除。"
   if [[ "$ownership_recorded" -eq 1 ]] &&
     { [[ "$SERVICE_USER_CREATED" -eq 1 ]] || [[ "$SERVICE_GROUP_CREATED" -eq 1 ]]; }; then
     printf '有归属记录的 hysteria 服务账号/组已删除；root 登录账号未被修改。\n'

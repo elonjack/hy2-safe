@@ -7,13 +7,16 @@ export HY2_SAFE_SOURCE_ONLY=1
 # shellcheck source=../hy2-safe.sh
 source "${TEST_ROOT}/hy2-safe.sh"
 
-[[ "$PROGRAM_VERSION" == "1.0.7" ]]
+[[ "$PROGRAM_VERSION" == "1.0.8" ]]
 validate_domain "hy2.example.com"
 ! validate_domain "invalid_domain"
 validate_email "owner@example.com"
 validate_acme_type "http"
 validate_acme_type "tls"
+validate_acme_type "dns"
 ! validate_acme_type "both"
+validate_cloudflare_token "cfut_0123456789abcdefghijklmnop"
+! validate_cloudflare_token "bad token"
 validate_port "443"
 validate_port "65535"
 ! validate_port "0"
