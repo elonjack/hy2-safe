@@ -19,7 +19,7 @@ def forbid(pattern: str, message: str) -> None:
 
 
 require(r"^set -Eeuo pipefail$", "strict Bash mode is required")
-require(r'PROGRAM_VERSION="1\.0\.1"', "the release must expose its manager version")
+require(r'PROGRAM_VERSION="1\.0\.2"', "the release must expose its manager version")
 require(r"require_supported_os", "installations must be limited to Debian 12/13")
 require(r"sha256sum", "release binaries must be checksum-verified")
 require(r"release_asset_field", "release metadata must be parsed structurally")
@@ -80,6 +80,11 @@ require(r"HOURLY_SECONDS = 3600", "reconnect alerts must be rate-limited")
 require(r'f"v4:\{network\.network_address\}/24"', "IPv4 alerts must group by /24")
 require(r'f"v6:\{network\.network_address\}/48"', "IPv6 alerts must group by /48")
 require(r"--token-file FILE --chat-id ID", "Telegram setup must support a secret token file")
+require(r"如果知道自己的私人 Chat ID，请输入", "interactive Telegram setup must accept a known private Chat ID")
+require(r'pairing_code="HY2-\$\(openssl rand -hex 8\)"', "unknown Chat IDs must use a random one-time pairing code")
+require(r'message\.get\("text"\) != pairing_code', "Telegram discovery must only accept the exact pairing code")
+require(r"一次性配对码对应多个私人聊天，拒绝自动绑定", "ambiguous pairing codes must fail closed")
+require(r"确认请输入 YES", "interactive setup must confirm that the test message reached the owner")
 require(r"是否现在开启 Telegram 成功连接提醒", "interactive installs must offer Telegram setup")
 require(r"flock -u 9\s+command_telegram_setup", "the install lock must be released before Telegram setup")
 require(r"hy2-safe.*一键管理菜单", "running without a command must offer a management menu")
@@ -113,6 +118,17 @@ require(r'groupdel hysteria', "full uninstall must delete a script-created servi
 require(r"拒绝删除不在 hy2-safe 白名单中的目录", "recursive deletion must use an exact allowlist")
 require(r"ProtectSystem=strict$", "the service unit must protect the filesystem")
 require(r"ProcSubset=pid", "services must receive a restricted /proc view")
+notifier_unit = re.search(
+    r"write_notifier_unit\(\) \{.*?cat >\"\$NOTIFIER_SERVICE_PATH\" <<EOF\n(.*?)\nEOF",
+    SCRIPT,
+    re.DOTALL,
+)
+if notifier_unit is None:
+    raise AssertionError("the notifier systemd unit must be extractable")
+if re.search(r"(?m)^ProcSubset=pid$", notifier_unit.group(1)):
+    raise AssertionError("the notifier must expose boot_id to its journalctl child")
+if "ProtectProc=invisible" not in notifier_unit.group(1):
+    raise AssertionError("the notifier must retain process visibility hardening")
 require(r"MemoryDenyWriteExecute=true", "services must deny writable executable memory")
 require(r"ReadWritePaths=/usr/local/bin /run/lock", "the updater must have a narrow writable filesystem")
 require(r"正在自动回滚", "updates must implement rollback")
@@ -218,7 +234,7 @@ if README.count("```") % 2:
     raise AssertionError("README fenced code blocks must be balanced")
 if "[!IMPORTANT]" not in README or "[!WARNING]" not in README:
     raise AssertionError("README must make the main safety warnings prominent")
-if "hy2-safe v1.0.1 一键管理菜单" not in README:
+if "hy2-safe v1.0.2 一键管理菜单" not in README:
     raise AssertionError("README menu version must match the release")
 if "/etc/hysteria/hy2-safe-account.env" not in README:
     raise AssertionError("README must explain the account ownership record")
@@ -242,6 +258,8 @@ for secret_pattern, description in (
         raise AssertionError(f"unexpected {description} literal in public files")
 if "raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh" not in README:
     raise AssertionError("README must contain the public one-line installer URL")
+if "apt-get install -y --no-install-recommends ca-certificates curl" not in README:
+    raise AssertionError("the one-line installer must support minimal Debian without curl")
 if "sudo " in README:
     raise AssertionError("README commands are written for the root-user workflow")
 for label, target in re.findall(r"\[([^\]\n]+)\]\(([^)\n]+)\)", README):
