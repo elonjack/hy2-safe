@@ -42,6 +42,7 @@
 - 从 Hysteria 官方仓库安装最新稳定版。
 - 校验 GitHub Release 元数据、文件大小、Asset SHA-256、官方 `hashes.txt` 和二进制报告版本。
 - 使用自己的域名，由 Hysteria ACME 自动申请并续期公开可信证书。
+- 默认使用简单的 HTTP-01；可选 Cloudflare DNS-01，完全释放入站 TCP 80/443。
 - 客户端保持官方默认的证书验证，分享链接明确输出 `insecure=0`。
 - 安装和修改前自动核对域名解析、本机公网地址、所选 ACME TCP 端口及 Hy2 UDP 端口冲突。
 - 默认开启原生 UDP 端口跳跃：`50000-50500`（共 501 个端口）。
@@ -114,17 +115,19 @@ VPS 系统防火墙和云厂商安全组是两层不同的过滤：
 
 `hy2-safe` 不会清空、开启或重写你的系统防火墙，也无法修改云厂商控制台。Hysteria 为端口跳跃创建的临时重定向规则不等于默认拒绝防火墙中的“允许入站”规则。
 
-默认配置明确使用 ACME `http` 验证，因此只需要 TCP `80`，不占 TCP `443`。申请和续期时 Hysteria 会临时监听所选验证端口；平时 Hy2 数据仍走 UDP，但 TCP `80` 必须保持可用，不能同时由 Nginx、Caddy、Apache 等程序长期监听。若明确改用 `--acme-type tls`，则改为只需要 TCP `443`，TCP `80` 可以给其他程序使用；同理，TCP `443` 必须留给 ACME。
+默认配置明确使用 ACME `http` 验证，因此只需要 TCP `80`，不占 TCP `443`。申请和续期时 Hysteria 会临时监听所选验证端口；平时 Hy2 数据仍走 UDP，但 TCP `80` 必须保持可用，不能同时由 Nginx、Caddy、Apache 等程序长期监听。
+
+如果同一台 VPS 还要运行网站，可以在安装或修改时选择 Cloudflare DNS-01。它通过 Cloudflare API 创建临时 TXT 记录验证域名，不需要任何入站 TCP 80/443；网站可以完整使用这两个端口。DNS-01 只改变证书验证方式，Hy2 的 `A`/`AAAA` 记录仍必须是灰云。
 
 ## 一行命令开始使用
 
 以 `root` 登录 VPS，复制下面一整行：
 
 ```bash
-apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.0.7/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.0.7/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
+apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.0.8/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.0.8/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
 ```
 
-这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.0.7` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
+这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.0.8` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
 
 如果想先查看：
 
@@ -155,6 +158,8 @@ chmod 0700 /root/hy2-safe.sh
 | --- | --- |
 | 证书/SNI 域名 | 填写灰云子域名，例如 `hy2.example.com` |
 | ACME 通知邮箱 | 填写可以接收邮件的邮箱 |
+| 改用 Cloudflare DNS-01 | 只运行 Hy2 就直接回车；还要运行网站则输入 `y` |
+| Cloudflare API Token | 仅选择 DNS-01 后隐藏输入，终端不会显示字符 |
 | 开启原生端口跳跃 | 直接回车，默认开启 |
 | UDP 跳跃端口范围 | 直接回车，默认 `50000-50500` |
 | 自定义 HTTPS 伪装站点 | 直接回车，使用本机固定小页面 |
@@ -181,7 +186,7 @@ hy2-safe
 菜单如下：
 
 ```text
-hy2-safe v1.0.7 · Hysteria 2 管理菜单
+hy2-safe v1.0.8 · Hysteria 2 管理菜单
 
   1) 安装 Hy2
   2) 完整卸载 Hy2
@@ -340,13 +345,83 @@ acme:
   type: http
 ```
 
-这表示只使用 HTTP-01，即 TCP `80`。脚本不再依赖 Hysteria 的旧兼容模式同时准备 80 和 443。确实需要把 TCP 80 留给其他网站时，可以改成 TLS-ALPN-01：
+这表示只使用 HTTP-01，即 TCP `80`。它最容易理解，不需要 Cloudflare API Token，所以仍然是默认方案。脚本不再依赖 Hysteria 的旧兼容模式同时准备 80 和 443。
+
+如果只是想把验证端口从 80 换到 443，也可以改成 TLS-ALPN-01：
 
 ```bash
 hy2-safe configure --acme-type tls --non-interactive
 ```
 
-此时只需要 TCP `443`，而且该端口不能再被其他程序同时监听。切换前脚本会检查所选 TCP 端口和全部 Hy2 UDP 端口；还会解析域名并尽量与本机公网 IPv4/IPv6 比对。发现小黄云、错误 A/AAAA 或端口冲突时会在写配置前停止，避免把正常服务改坏。
+此时只需要 TCP `443`，而且该端口不能再被其他程序同时监听。HTTP-01 和 TLS-ALPN-01 都要求域名直接解析到这台 VPS，并要求对应 TCP 端口能从公网访问。
+
+### 可选的 Cloudflare DNS-01
+
+如果同一台 VPS 还要运行 Nginx、Caddy、面板或其他网站，推荐选择 Cloudflare DNS-01。Hysteria 会通过 Cloudflare API 临时创建 `_acme-challenge` TXT 记录来证明域名控制权，申请和续期都不需要入站 TCP `80` 或 `443`。
+
+DNS-01 不会改变 Hy2 的连接方式：
+
+- Hy2 的 `A`/`AAAA` 记录仍然指向 VPS，并保持灰云。
+- 客户端域名、证书验证和 UDP 端口跳跃不变。
+- Cloudflare Token 只用于管理证书验证 TXT 记录，不会发送给客户端。
+- DNS-01 不会让 Cloudflare 代理 Hy2，也不会隐藏 VPS IP。
+
+#### 创建最小权限 Token
+
+在 Cloudflare 控制台右上角进入个人资料，然后依次打开 `API Tokens`、`Create Token`、`Create Custom Token`。建议填写：
+
+| 项目 | 设置 |
+| --- | --- |
+| Token 名称 | `hy2-safe-证书`，名称可以自定义 |
+| 权限 1 | `Zone` → `DNS` → `Edit` |
+| 权限 2 | `Zone` → `Zone` → `Read` |
+| Zone Resources | `Include` → `Specific zone` → 只选择 Hy2 域名所属的根域名 |
+
+例如 Hy2 域名是 `hy2.example.com`，这里只选择 `example.com`。不要使用 Global API Key，也不要给所有 Zone 权限。Token 创建后只显示一次，请复制到密码管理器，不能截图或发到群聊。
+
+> [!IMPORTANT]
+> `DNS Edit` 是 Hysteria 创建和删除验证 TXT 记录所必需的权限；`Zone Read` 用于让脚本在修改配置前确认 Token 有效且能找到这个域名所属的 Zone。即使 Token 泄露，限制为单个 Zone 也比账号全局密钥更容易控制风险。
+
+#### 在脚本中开启
+
+运行：
+
+```bash
+hy2-safe
+```
+
+选择 `7) 修改 Hy2 配置`。出现“改用 Cloudflare DNS-01”时输入 `y`，然后粘贴 Token；输入过程不会显示字符。脚本会先进行只读验证，确认 Token 处于启用状态并且能访问正确 Zone，然后才写配置和重启 Hysteria。真正申请证书时，Hysteria 会进一步验证 `DNS Edit` 权限。
+
+如果服务或证书申请失败，修改操作会恢复原来的配置和 Token，原本能用的 Hy2 不会被半套新配置替换。
+
+自动化配置只能从 root-only 文件读取 Token，不能把 Token 直接写在命令行参数里：
+
+```bash
+install -m 0600 /dev/null /root/cloudflare-token
+read -rsp "粘贴 Cloudflare API Token: " CF_TOKEN
+printf '\n'
+printf '%s\n' "$CF_TOKEN" > /root/cloudflare-token
+unset CF_TOKEN
+
+hy2-safe configure \
+  --acme-type dns \
+  --cloudflare-token-file /root/cloudflare-token \
+  --non-interactive
+
+rm -f -- /root/cloudflare-token
+```
+
+Token 会保存在 VPS 的 root-only 管理设置中，并写入 Hysteria 必须读取的服务端配置。管理设置权限为 `0600 root:root`，服务端配置权限为 `0640 root:hysteria`，其他普通用户不能读取。Hysteria 服务为了完成 DNS 验证必须能读取 Token，因此仍应严格使用上面的单 Zone 最小权限。
+
+以后轮换 Token，再运行菜单 `7`，保留 DNS-01 并在“更换当前 Cloudflare API Token”处输入 `y`。切回默认 HTTP-01：
+
+```bash
+hy2-safe configure --acme-type http --non-interactive
+```
+
+成功切换后，脚本会从管理设置和 Hysteria 配置中删除旧 Cloudflare Token。你也可以在 Cloudflare 控制台撤销不再使用的 Token。
+
+切换验证方式前，脚本会检查相关 TCP 端口和全部 Hy2 UDP 端口；还会解析域名并尽量与本机公网 IPv4/IPv6 比对。发现小黄云、错误 A/AAAA 或端口冲突时会在写配置前停止，避免把正常服务改坏。DNS-01 没有 ACME TCP 端口，因此只检查 Hy2 UDP 端口。
 
 服务端监听写法为 `:端口` 或 `:端口范围`，按照 Hysteria 官方定义会监听所有可用 IPv4 和 IPv6 接口。
 
@@ -592,6 +667,7 @@ hy2-safe
 - systemd 服务、自动更新任务和证书健康检查任务。
 - Hy2 服务端配置、密码和客户端信息。
 - ACME 证书和账户状态。
+- Cloudflare DNS-01 API Token（如果已配置）。
 - Telegram Bot Token 和通知状态。
 - 有 root-only 归属记录证明由本脚本创建的 `hysteria` 服务用户和组。
 
@@ -608,7 +684,7 @@ hy2-safe
 重新安装时，再次执行 README 的一行命令即可。Hysteria 会重新验证域名并申请新证书。
 
 > [!WARNING]
-> 不要在短时间内反复完整卸载重装。删除 ACME 状态后会重新签发证书，可能触发 CA 频率限制。重新安装前先确认域名、灰云和当前选择的 ACME 端口正确（默认 TCP 80；`--acme-type tls` 时为 TCP 443），避免连续验证失败。
+> 不要在短时间内反复完整卸载重装。删除 ACME 状态后会重新签发证书，可能触发 CA 频率限制。重新安装前先确认域名和灰云正确；HTTP-01 还要确认 TCP 80，TLS-ALPN-01 要确认 TCP 443，Cloudflare DNS-01 则要确认 Token 未撤销且权限正确，避免连续验证失败。
 
 ## 安全设计
 
@@ -641,6 +717,7 @@ hy2-safe
 - 管理设置和 Telegram Token 为 root-only `0600`。
 - Hysteria 配置为 `0640 root:hysteria`。
 - 客户端保持证书验证。
+- Cloudflare Token 只接受不回显输入或 root-only 文件，并建议限制到单个 Zone 的 `DNS Edit` 与 `Zone Read`。
 - Telegram Token 不接受命令行明文参数。
 
 ### 不会自动做的事
@@ -654,11 +731,12 @@ hy2-safe
 
 ## 隐私与敏感信息
 
-公开仓库中的脚本和 README 不包含你的真实域名、VPS IP、邮箱、Hy2 密码、证书私钥、Telegram Bot Token 或 Chat ID。安装时填写或生成的内容保存在你自己的 VPS 上，不会上传到本项目的 GitHub 仓库。
+公开仓库中的脚本和 README 不包含你的真实域名、VPS IP、邮箱、Hy2 密码、证书私钥、Cloudflare API Token、Telegram Bot Token 或 Chat ID。安装时填写或生成的内容保存在你自己的 VPS 上，不会上传到本项目的 GitHub 仓库。
 
 以下内容本来就需要交给对应服务才能工作：
 
 - 域名和 ACME 邮箱会交给证书机构申请公开可信证书。
+- 选择 Cloudflare DNS-01 后，Hysteria 会使用 Token 调用 Cloudflare API 创建和删除证书验证 TXT 记录。
 - 启用 Telegram 后，Bot Token、固定 Chat ID、已隐藏部分地址的客户端 IP、提醒时间、Hy2 汇总流量和 VPS 网卡汇总流量会通过 Telegram Bot API 处理。
 - 下载和自动更新会访问 Hysteria 官方 GitHub Release。
 
@@ -666,6 +744,7 @@ hy2-safe
 
 - `hy2-safe show-client` 会在当前 SSH 终端显示完整 Hy2 密码和分享链接。脚本会先警告；不要截图、录屏或发送到群聊。
 - Hysteria 的 systemd 日志会保留客户端完整来源 IP；Telegram 消息只发送隐藏后的 IPv4 `/24` 或 IPv6 `/48`。
+- Cloudflare Token 通过不回显输入或 root-only 文件读取，不接受命令行明文参数；不用 DNS-01 后应在 Cloudflare 控制台撤销旧 Token。
 - Telegram Token 通过不回显输入或 root-only 文件读取，不接受命令行明文参数。
 - Hy2 自定义密码同样不接受命令行明文，只能使用 root-only `--password-file`；不指定时自动生成。
 
@@ -676,8 +755,8 @@ hy2-safe
 | `/usr/local/bin/hysteria` | 当前 Hysteria 核心 |
 | `/usr/local/bin/hysteria.previous` | 更新回滚版本 |
 | `/usr/local/sbin/hy2-safe` | 管理脚本 |
-| `/etc/hysteria/config.yaml` | Hysteria 服务端配置 |
-| `/etc/hysteria/hy2-safe.env` | root-only 管理设置 |
+| `/etc/hysteria/config.yaml` | Hysteria 服务端配置；DNS-01 模式含 Cloudflare Token，权限 `0640 root:hysteria` |
+| `/etc/hysteria/hy2-safe.env` | root-only 管理设置；DNS-01 模式含 Cloudflare Token，权限 `0600` |
 | `/etc/hysteria/hy2-safe-account.env` | root-only 服务账号创建归属与 UID/GID 记录 |
 | `/etc/hysteria/telegram-notifier.json` | root-only Telegram 凭据 |
 | `/var/lib/hysteria/acme` | ACME 证书和账户状态 |
@@ -794,6 +873,7 @@ rm -f /root/hy2-password
 - Cloudflare 开启了小黄云。
 - 默认 HTTP-01 所需的 TCP 80 被系统防火墙或云防火墙阻挡；使用 `--acme-type tls` 时则检查 TCP 443。
 - 当前选择的 ACME TCP 端口被 Nginx、Caddy、Apache 等程序占用。脚本通常会在安装或修改前直接指出这一冲突。
+- Cloudflare DNS-01 的 Token 被撤销、没有限定到正确 Zone，或者缺少 `DNS Edit`/`Zone Read` 权限。DNS-01 不需要检查 TCP 80/443。
 - 短时间连续失败或重新签发触发 CA 限制。
 
 修正后使用：
@@ -880,15 +960,17 @@ hy2-safe rotate-password
 - [Hysteria 2 完整服务端配置](https://v2.hysteria.network/docs/advanced/Full-Server-Config/)
 - [Hysteria 2 完整客户端配置](https://v2.hysteria.network/docs/advanced/Full-Client-Config/)
 - [Hysteria 2 端口跳跃](https://v2.hysteria.network/docs/advanced/Port-Hopping/)
+- [Hysteria 2 DNS ACME 配置](https://v2.hysteria.network/docs/advanced/ACME-DNS-Config/)
 - [Hysteria 2 URI 规范](https://v2.hysteria.network/docs/developers/URI-Scheme/)
 - [Hysteria 2 流量统计 API](https://v2.hysteria.network/docs/advanced/Traffic-Stats-API/)
 - [Hysteria 2 协议与 HTTP/3 伪装](https://v2.hysteria.network/docs/developers/Protocol/)
 - [Hysteria 2 性能说明](https://v2.hysteria.network/docs/advanced/Performance/)
 - [Telegram Bot API](https://core.telegram.org/bots/api)
+- [Cloudflare 创建 API Token](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/)
 - [Let’s Encrypt 频率限制](https://letsencrypt.org/docs/rate-limits/)
 
 ## 版本
 
-当前管理脚本正式版本：`v1.0.7`
+当前管理脚本正式版本：`v1.0.8`
 
 Release 页面：[elonjack/hy2-safe/releases](https://github.com/elonjack/hy2-safe/releases)
