@@ -19,7 +19,7 @@ def forbid(pattern: str, message: str) -> None:
 
 
 require(r"^set -Eeuo pipefail$", "strict Bash mode is required")
-require(r'PROGRAM_VERSION="1\.0\.3"', "the release must expose its manager version")
+require(r'PROGRAM_VERSION="1\.0\.4"', "the release must expose its manager version")
 require(r"require_supported_os", "installations must be limited to Debian 12/13")
 require(r"sha256sum", "release binaries must be checksum-verified")
 require(r"release_asset_field", "release metadata must be parsed structurally")
@@ -226,6 +226,32 @@ event = extract_connection(
 if event is None or event[0] != "123.45.67.89:4567":
     raise AssertionError("successful Hysteria connection logs must be recognized")
 
+colored_message = (
+    "2026-07-30T15:35:10+08:00\t\x1b[34mINFO\x1b[0m\t"
+    'client connected\t{"addr":"198.51.100.77:2776","id":"user","tx":0}'
+)
+binary_event = extract_connection(
+    {
+        "MESSAGE": list(colored_message.encode("utf-8")),
+        "__REALTIME_TIMESTAMP": "1785396910639499",
+    }
+)
+if binary_event is None or binary_event[0] != "198.51.100.77:2776":
+    raise AssertionError(
+        "ANSI-colored journal MESSAGE byte arrays must be recognized"
+    )
+
+trailing_ansi_event = extract_connection(
+    {
+        "MESSAGE": (
+            'INFO client connected {"addr":"123.45.67.89:4567",'
+            '"id":"user","tx":0}\x1b[0m'
+        ),
+    }
+)
+if trailing_ansi_event is None or trailing_ansi_event[0] != "123.45.67.89:4567":
+    raise AssertionError("trailing ANSI data must not hide successful connections")
+
 state = default_state()
 config = {}
 process_connection(state, config, "123.45.67.89:4567", 1000.0)
@@ -248,7 +274,7 @@ if README.count("```") % 2:
     raise AssertionError("README fenced code blocks must be balanced")
 if "[!IMPORTANT]" not in README or "[!WARNING]" not in README:
     raise AssertionError("README must make the main safety warnings prominent")
-if "hy2-safe v1.0.3 · Hysteria 2 管理菜单" not in README:
+if "hy2-safe v1.0.4 · Hysteria 2 管理菜单" not in README:
     raise AssertionError("README menu version must match the release")
 if "/etc/hysteria/hy2-safe-account.env" not in README:
     raise AssertionError("README must explain the account ownership record")

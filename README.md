@@ -175,7 +175,7 @@ hy2-safe
 菜单如下：
 
 ```text
-hy2-safe v1.0.3 · Hysteria 2 管理菜单
+hy2-safe v1.0.4 · Hysteria 2 管理菜单
 
   1) 安装 Hy2
   2) 完整卸载 Hy2
@@ -712,6 +712,9 @@ hy2-safe telegram-logs
 hy2-safe status
 ```
 
+`v1.0.4` 起，提醒程序同时兼容 systemd journal 返回的普通字符串日志和
+字节数组日志。后者可能在 Hysteria 日志包含终端颜色控制字符时出现。
+
 确认：
 
 - Bot Token 没有被 `@BotFather` 撤销。
@@ -764,6 +767,6 @@ rm -f /root/hy2-new-password
 
 ## 版本
 
-当前管理脚本正式版本：`v1.0.0`
+当前管理脚本正式版本：`v1.0.4`
 
 Release 页面：[elonjack/hy2-safe/releases](https://github.com/elonjack/hy2-safe/releases)
