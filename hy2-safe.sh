@@ -15,7 +15,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.0.4"
+readonly PROGRAM_VERSION="1.0.5"
 readonly REPOSITORY="apernet/hysteria"
 readonly API_URL="https://api.github.com/repos/${REPOSITORY}/releases/latest"
 readonly RELEASE_URL="https://github.com/${REPOSITORY}/releases/download"
@@ -157,6 +157,7 @@ usage() {
   hy2-safe logs
   hy2-safe telegram-setup [--token-file FILE --chat-id ID]
   hy2-safe telegram-test
+  hy2-safe telegram-report
   hy2-safe telegram-logs
   hy2-safe telegram-disable
   hy2-safe telegram-replace [--token-file FILE --chat-id ID]
@@ -1128,15 +1129,18 @@ write_notifier_script() {
   tmp="$(mktemp /usr/local/libexec/.hy2-safe-notifier.XXXXXX)"
   cat >"$tmp" <<'PY'
 #!/usr/bin/env python3
-"""Send rate-limited Telegram alerts for successful Hysteria client sessions."""
+"""Send safe Hysteria connection alerts and persisted traffic reports."""
 
 from __future__ import annotations
 
 import datetime as dt
+import html
 import ipaddress
 import json
+import math
 import os
 import selectors
+import signal
 import subprocess
 import sys
 import time
@@ -1153,6 +1157,12 @@ MAX_GROUPS = 512
 MAX_OUTBOX = 128
 PRUNE_AFTER_SECONDS = 90 * 86400
 TICK_SECONDS = 30
+TRAFFIC_SAMPLE_SECONDS = 60
+REPORT_HOUR = 8
+REPORT_MINUTE = 0
+MONTHLY_REPORT_MINUTE = 5
+TRAFFIC_DAY_RETENTION = 70
+MAX_INTERFACES = 16
 
 state_dir = Path(os.environ.get("STATE_DIRECTORY", "/var/lib/hy2-safe-notifier"))
 state_path = state_dir / "state.json"
@@ -1210,29 +1220,202 @@ def load_config() -> dict[str, Any]:
     }
 
 
-def default_state() -> dict[str, Any]:
-    today = dt.datetime.now(BEIJING).date().isoformat()
+def empty_day() -> dict[str, Any]:
     return {
-        "version": 1,
-        "last_daily_date": today,
+        "hy2_upload": 0,
+        "hy2_download": 0,
+        "vps_receive": 0,
+        "vps_send": 0,
+        "hy2_samples": 0,
+        "vps_samples": 0,
+        "peak_online": 0,
+        "sources": {},
+    }
+
+
+def default_state(now: float | None = None) -> dict[str, Any]:
+    timestamp = time.time() if now is None else now
+    today = dt.datetime.fromtimestamp(timestamp, BEIJING).date().isoformat()
+    return {
+        "version": 2,
+        "reporting_started_date": today,
+        "last_daily_report": "",
+        "last_monthly_report": "",
         "groups": {},
         "outbox": {},
+        "traffic": {
+            "hy2_last": None,
+            "interfaces_last": {},
+            "days": {},
+        },
     }
+
+
+def nonnegative_int(value: Any) -> int:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return 0
+
+
+def nonnegative_float(value: Any) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(result) or result < 0:
+        return 0.0
+    return result
+
+
+def normalize_groups(value: Any) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    if not isinstance(value, dict):
+        return result
+    for key, group in list(value.items())[-MAX_GROUPS:]:
+        if (
+            not isinstance(key, str)
+            or not 1 <= len(key) <= 128
+            or not isinstance(group, dict)
+        ):
+            continue
+        label = group.get("label")
+        if not isinstance(label, str) or not 1 <= len(label) <= 128:
+            continue
+        first_seen = nonnegative_float(group.get("first_seen"))
+        last_seen = nonnegative_float(group.get("last_seen"))
+        last_summary = nonnegative_float(group.get("last_summary"))
+        result[key] = {
+            "label": label,
+            "first_seen": first_seen,
+            "last_seen": last_seen,
+            "total": nonnegative_int(group.get("total")),
+            "pending_reconnects": nonnegative_int(group.get("pending_reconnects")),
+            "last_summary": last_summary or first_seen,
+        }
+    return result
+
+
+def normalize_day(value: Any) -> dict[str, Any]:
+    result = empty_day()
+    if not isinstance(value, dict):
+        return result
+    for key in (
+        "hy2_upload",
+        "hy2_download",
+        "vps_receive",
+        "vps_send",
+        "hy2_samples",
+        "vps_samples",
+        "peak_online",
+    ):
+        result[key] = nonnegative_int(value.get(key))
+    sources = value.get("sources")
+    if isinstance(sources, dict):
+        for key, count in list(sources.items())[:MAX_GROUPS]:
+            if isinstance(key, str) and 1 <= len(key) <= 128:
+                normalized_count = nonnegative_int(count)
+                if normalized_count:
+                    result["sources"][key] = normalized_count
+    return result
+
+
+def normalize_outbox(value: Any) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    if not isinstance(value, dict):
+        return result
+    for key, item in list(value.items())[-MAX_OUTBOX:]:
+        if (
+            not isinstance(key, str)
+            or not isinstance(item, dict)
+            or not isinstance(item.get("text"), str)
+        ):
+            continue
+        result[key] = {
+            "text": item["text"][:4096],
+            "created": nonnegative_float(item.get("created")),
+            "silent": bool(item.get("silent", False)),
+        }
+    return result
+
+
+def is_iso_date(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return dt.date.fromisoformat(value).isoformat() == value
+    except ValueError:
+        return False
+
+
+def is_iso_month(value: Any) -> bool:
+    if not isinstance(value, str) or len(value) != 7:
+        return False
+    try:
+        return dt.date.fromisoformat(value + "-01").strftime("%Y-%m") == value
+    except ValueError:
+        return False
+
+
+def normalize_state(value: Any, now: float | None = None) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("state is not an object")
+    version = value.get("version")
+    result = default_state(now)
+    if version == 1:
+        # v1 had no durable traffic counters. Preserve connection groups and
+        # queued alerts, then start traffic accounting from the first v2 sample.
+        result["groups"] = normalize_groups(value.get("groups"))
+        result["outbox"] = normalize_outbox(value.get("outbox"))
+        return result
+    if version != 2:
+        raise ValueError("unsupported state version")
+    result["groups"] = normalize_groups(value.get("groups"))
+    result["outbox"] = normalize_outbox(value.get("outbox"))
+    candidate_start = value.get("reporting_started_date")
+    if is_iso_date(candidate_start):
+        result["reporting_started_date"] = candidate_start
+    candidate_daily = value.get("last_daily_report")
+    if candidate_daily == "" or is_iso_date(candidate_daily):
+        result["last_daily_report"] = candidate_daily
+    candidate_month = value.get("last_monthly_report")
+    if candidate_month == "" or is_iso_month(candidate_month):
+        result["last_monthly_report"] = candidate_month
+    traffic = value.get("traffic")
+    if not isinstance(traffic, dict):
+        return result
+    hy2_last = traffic.get("hy2_last")
+    if isinstance(hy2_last, dict):
+        result["traffic"]["hy2_last"] = {
+            "upload": nonnegative_int(hy2_last.get("upload")),
+            "download": nonnegative_int(hy2_last.get("download")),
+        }
+    interfaces_last = traffic.get("interfaces_last")
+    if isinstance(interfaces_last, dict):
+        for interface, counters in list(interfaces_last.items())[:MAX_INTERFACES]:
+            if (
+                isinstance(interface, str)
+                and 1 <= len(interface) <= 64
+                and isinstance(counters, dict)
+            ):
+                result["traffic"]["interfaces_last"][interface] = {
+                    "receive": nonnegative_int(counters.get("receive")),
+                    "send": nonnegative_int(counters.get("send")),
+                }
+    days = traffic.get("days")
+    if isinstance(days, dict):
+        for date_value, record in list(days.items())[-TRAFFIC_DAY_RETENTION:]:
+            if is_iso_date(date_value):
+                result["traffic"]["days"][date_value] = normalize_day(record)
+    return result
 
 
 def load_state() -> dict[str, Any]:
     try:
         value = json.loads(state_path.read_text(encoding="utf-8"))
-        if value.get("version") != 1:
-            raise ValueError("unsupported state version")
-        if not isinstance(value.get("groups"), dict):
-            raise ValueError("invalid groups")
-        if not isinstance(value.get("outbox"), dict):
-            raise ValueError("invalid outbox")
-        return value
+        return normalize_state(value)
     except FileNotFoundError:
         return default_state()
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         log(f"忽略损坏的提醒状态文件：{exc}")
         return default_state()
 
@@ -1328,49 +1511,244 @@ def telegram_call(config: dict[str, Any], method: str, fields: dict[str, str]) -
     return result.get("result")
 
 
-def send_message(config: dict[str, Any], text: str) -> None:
+def send_message(config: dict[str, Any], text: str, silent: bool = False) -> None:
     telegram_call(
         config,
         "sendMessage",
         {
             "chat_id": config["chat_id"],
             "text": text[:4096],
+            "parse_mode": "HTML",
+            "disable_notification": "true" if silent else "false",
             "protect_content": "true",
         },
     )
 
 
-def online_count(config: dict[str, Any]) -> int | None:
+def stats_json(config: dict[str, Any], path: str) -> Any:
     request = urllib.request.Request(
-        f"http://127.0.0.1:{config['stats_port']}/online",
+        f"http://127.0.0.1:{config['stats_port']}{path}",
         headers={"Authorization": config["stats_secret"]},
     )
+    with urllib.request.urlopen(request, timeout=3) as response:
+        raw = response.read(65_537)
+    if len(raw) > 65_536:
+        raise ValueError("traffic stats response is too large")
+    return json.loads(raw.decode("utf-8"))
+
+
+def online_count(config: dict[str, Any]) -> int | None:
     try:
-        with urllib.request.urlopen(request, timeout=3) as response:
-            raw = response.read(65_537)
-        if len(raw) > 65_536:
-            return None
-        value = json.loads(raw.decode("utf-8"))
-        if not isinstance(value, dict):
-            return None
-        counts = list(value.values())
-        if not all(isinstance(item, int) and item >= 0 for item in counts):
-            return None
-        return sum(counts)
-    except (OSError, ValueError, json.JSONDecodeError):
+        value = stats_json(config, "/online")
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
         return None
+    if not isinstance(value, dict):
+        return None
+    counts = list(value.values())
+    if not all(
+        isinstance(item, int) and not isinstance(item, bool) and item >= 0
+        for item in counts
+    ):
+        return None
+    return sum(counts)
 
 
 def online_line(config: dict[str, Any]) -> str:
     count = online_count(config)
     if count is None:
-        return "当前在线客户端：暂时无法读取"
-    return f"当前在线客户端：{count}"
+        return "🟢 在线　<code>暂时无法读取</code>"
+    return f"🟢 在线　<b>{count}</b> 台设备"
 
 
-def queue_message(state: dict[str, Any], key: str, text: str, now: float) -> None:
+def hy2_traffic_totals(config: dict[str, Any]) -> dict[str, int] | None:
+    try:
+        value = stats_json(config, "/traffic")
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    upload = 0
+    download = 0
+    for counters in value.values():
+        if not isinstance(counters, dict):
+            return None
+        tx = counters.get("tx")
+        rx = counters.get("rx")
+        if not all(
+            isinstance(item, int) and not isinstance(item, bool) and item >= 0
+            for item in (tx, rx)
+        ):
+            return None
+        upload += tx
+        download += rx
+    return {"upload": upload, "download": download}
+
+
+def valid_interface_name(value: str) -> bool:
+    return (
+        1 <= len(value) <= 64
+        and value not in {".", "..", "lo"}
+        and "/" not in value
+        and "\x00" not in value
+    )
+
+
+def default_route_interfaces() -> set[str]:
+    interfaces: set[str] = set()
+    try:
+        lines = Path("/proc/net/route").read_text(encoding="ascii").splitlines()[1:]
+        for line in lines:
+            fields = line.split()
+            if len(fields) >= 4 and fields[1] == "00000000":
+                try:
+                    flags = int(fields[3], 16)
+                except ValueError:
+                    continue
+                if flags & 0x1 and valid_interface_name(fields[0]):
+                    interfaces.add(fields[0])
+    except OSError:
+        pass
+    try:
+        lines = Path("/proc/net/ipv6_route").read_text(encoding="ascii").splitlines()
+        for line in lines:
+            fields = line.split()
+            if (
+                len(fields) >= 10
+                and fields[0] == "0" * 32
+                and fields[1] == "00"
+                and valid_interface_name(fields[-1])
+            ):
+                interfaces.add(fields[-1])
+    except OSError:
+        pass
+    if interfaces:
+        return interfaces
+    try:
+        candidates = sorted(Path("/sys/class/net").iterdir(), key=lambda path: path.name)
+    except OSError:
+        return interfaces
+    ignored_prefixes = (
+        "br-",
+        "docker",
+        "dummy",
+        "tailscale",
+        "veth",
+        "virbr",
+        "tun",
+        "tap",
+        "wg",
+    )
+    for candidate in candidates:
+        name = candidate.name
+        if (
+            valid_interface_name(name)
+            and not name.startswith(ignored_prefixes)
+            and (candidate / "statistics" / "rx_bytes").is_file()
+        ):
+            interfaces.add(name)
+            if len(interfaces) >= MAX_INTERFACES:
+                break
+    return interfaces
+
+
+def network_counters() -> dict[str, dict[str, int]]:
+    result: dict[str, dict[str, int]] = {}
+    for interface in sorted(default_route_interfaces())[:MAX_INTERFACES]:
+        base = Path("/sys/class/net") / interface / "statistics"
+        try:
+            receive = int((base / "rx_bytes").read_text(encoding="ascii").strip())
+            send = int((base / "tx_bytes").read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            continue
+        if receive < 0 or send < 0:
+            continue
+        result[interface] = {"receive": receive, "send": send}
+    return result
+
+
+def counter_delta(previous: int | None, current: int) -> int:
+    if previous is None:
+        return 0
+    if current >= previous:
+        return current - previous
+    # Hysteria, the VPS, or an interface restarted and reset its counter.
+    return current
+
+
+def day_record(state: dict[str, Any], date_value: str) -> dict[str, Any]:
+    days = state["traffic"]["days"]
+    record = days.get(date_value)
+    if not isinstance(record, dict):
+        record = empty_day()
+        days[date_value] = record
+    return record
+
+
+def sample_traffic(
+    state: dict[str, Any], config: dict[str, Any], now: float
+) -> None:
+    date_value = dt.datetime.fromtimestamp(now, BEIJING).date().isoformat()
+    record = day_record(state, date_value)
+    traffic = state["traffic"]
+
+    current_hy2 = hy2_traffic_totals(config)
+    if current_hy2 is not None:
+        previous_hy2 = traffic.get("hy2_last")
+        if not isinstance(previous_hy2, dict):
+            previous_hy2 = {}
+        record["hy2_upload"] += counter_delta(
+            previous_hy2.get("upload"), current_hy2["upload"]
+        )
+        record["hy2_download"] += counter_delta(
+            previous_hy2.get("download"), current_hy2["download"]
+        )
+        record["hy2_samples"] += 1
+        traffic["hy2_last"] = current_hy2
+
+    current_interfaces = network_counters()
+    if current_interfaces:
+        previous_interfaces = traffic.get("interfaces_last")
+        if not isinstance(previous_interfaces, dict):
+            previous_interfaces = {}
+        for interface, current in current_interfaces.items():
+            previous = previous_interfaces.get(interface)
+            if not isinstance(previous, dict):
+                previous = {}
+            record["vps_receive"] += counter_delta(
+                previous.get("receive"), current["receive"]
+            )
+            record["vps_send"] += counter_delta(previous.get("send"), current["send"])
+        record["vps_samples"] += 1
+        traffic["interfaces_last"] = current_interfaces
+
+    current_online = online_count(config)
+    if current_online is not None:
+        record["peak_online"] = max(record["peak_online"], current_online)
+
+
+def format_bytes(value: int) -> str:
+    amount = max(0, value)
+    units = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
+    if amount < 1024:
+        return f"{amount} B"
+    unit_index = min((amount.bit_length() - 1) // 10, len(units) - 1)
+    divisor = 1024**unit_index
+    hundredths = (amount * 100 + divisor // 2) // divisor
+    return (
+        f"{hundredths // 100}.{hundredths % 100:02d} "
+        f"{units[unit_index]}"
+    )
+
+
+def queue_message(
+    state: dict[str, Any],
+    key: str,
+    text: str,
+    now: float,
+    silent: bool = False,
+) -> None:
     outbox = state["outbox"]
-    outbox[key] = {"text": text, "created": now}
+    outbox[key] = {"text": text, "created": now, "silent": silent}
     if len(outbox) <= MAX_OUTBOX:
         return
     oldest = sorted(
@@ -1379,6 +1757,17 @@ def queue_message(state: dict[str, Any], key: str, text: str, now: float) -> Non
     )
     for item in oldest[: len(outbox) - MAX_OUTBOX]:
         del outbox[item]
+
+
+def record_source(
+    state: dict[str, Any], key: str, timestamp: float
+) -> None:
+    date_value = dt.datetime.fromtimestamp(timestamp, BEIJING).date().isoformat()
+    sources = day_record(state, date_value)["sources"]
+    if key in sources:
+        sources[key] = nonnegative_int(sources[key]) + 1
+    elif len(sources) < MAX_GROUPS:
+        sources[key] = 1
 
 
 def process_connection(
@@ -1393,6 +1782,7 @@ def process_connection(
         log("忽略无法识别的客户端地址")
         return
     key, label = hidden_ip_group(address)
+    record_source(state, key, timestamp)
     groups = state["groups"]
     group = groups.get(key)
     if group is None:
@@ -1402,7 +1792,6 @@ def process_connection(
             "last_seen": timestamp,
             "total": 1,
             "pending_reconnects": 0,
-            "day_count": 1,
             "last_summary": timestamp,
         }
         groups[key] = group
@@ -1411,13 +1800,13 @@ def process_connection(
             f"new:{key}",
             "\n".join(
                 [
-                    "⚠️ Hy2 发现新的连接来源",
+                    "<b>🛡️ Hy2 新连接</b>",
                     "",
-                    f"IP（已隐藏最后一部分）：{label}",
-                    f"连接时间（北京时间）：{format_time(timestamp)}",
+                    f"🌐 来源　<code>{html.escape(label)}</code>",
+                    f"🕐 时间　<code>{format_time(timestamp)}</code>",
                     online_line(config),
                     "",
-                    "如果这不是你自己的网络，请立即更换 Hy2 密码。",
+                    "⚠️ 如果不是本人，请立即更换 Hy2 密码",
                 ]
             ),
             timestamp,
@@ -1427,18 +1816,19 @@ def process_connection(
         group["last_seen"] = timestamp
         group["total"] = int(group.get("total", 0)) + 1
         group["pending_reconnects"] = int(group.get("pending_reconnects", 0)) + 1
-        group["day_count"] = int(group.get("day_count", 0)) + 1
         if timestamp - previous_last_seen >= QUIET_RESET_SECONDS:
             queue_message(
                 state,
                 f"returned:{key}",
                 "\n".join(
                     [
-                        "⚠️ Hy2 连接来源在长时间未出现后再次连接",
+                        "<b>🛡️ Hy2 来源再次出现</b>",
                         "",
-                        f"IP（已隐藏最后一部分）：{label}",
-                        f"连接时间（北京时间）：{format_time(timestamp)}",
+                        f"🌐 来源　<code>{html.escape(label)}</code>",
+                        f"🕐 时间　<code>{format_time(timestamp)}</code>",
                         online_line(config),
+                        "",
+                        "ℹ️ 该来源超过 24 小时没有出现",
                     ]
                 ),
                 timestamp,
@@ -1460,12 +1850,11 @@ def queue_hourly_summaries(
             f"hourly:{key}",
             "\n".join(
                 [
-                    "Hy2 重连汇总",
+                    "<b>🔄 Hy2 重连汇总</b>",
                     "",
-                    f"IP（已隐藏最后一部分）：{group['label']}",
-                    f"首次发现：{format_time(float(group['first_seen']))}",
-                    f"最近连接：{format_time(float(group['last_seen']))}",
-                    f"本次合并的重复连接：{pending} 次",
+                    f"🌐 来源　<code>{html.escape(str(group['label']))}</code>",
+                    f"🕐 最近　<code>{format_time(float(group['last_seen']))}</code>",
+                    f"🔁 重连　<b>{pending}</b> 次",
                     online_line(config),
                 ]
             ),
@@ -1475,37 +1864,269 @@ def queue_hourly_summaries(
         group["last_summary"] = now
 
 
-def queue_daily_summary(
-    state: dict[str, Any], config: dict[str, Any], now: float
-) -> None:
-    today = dt.datetime.fromtimestamp(now, BEIJING).date().isoformat()
-    previous = state.get("last_daily_date")
-    if previous == today:
-        return
-    active = [
-        group
-        for group in state["groups"].values()
-        if int(group.get("day_count", 0)) > 0
+def aggregate_days(records: list[dict[str, Any]]) -> dict[str, Any]:
+    result = empty_day()
+    for record in records:
+        for key in (
+            "hy2_upload",
+            "hy2_download",
+            "vps_receive",
+            "vps_send",
+            "hy2_samples",
+            "vps_samples",
+        ):
+            result[key] += nonnegative_int(record.get(key))
+        result["peak_online"] = max(
+            result["peak_online"], nonnegative_int(record.get("peak_online"))
+        )
+        sources = record.get("sources")
+        if isinstance(sources, dict):
+            for key, count in sources.items():
+                result["sources"][key] = (
+                    nonnegative_int(result["sources"].get(key))
+                    + nonnegative_int(count)
+                )
+    return result
+
+
+def records_for_month(
+    state: dict[str, Any], month: str, through: str | None = None
+) -> list[tuple[str, dict[str, Any]]]:
+    result = []
+    for date_value, record in state["traffic"]["days"].items():
+        if date_value.startswith(month + "-") and (
+            through is None or date_value <= through
+        ):
+            result.append((date_value, record))
+    result.sort(key=lambda item: item[0])
+    return result
+
+
+def traffic_block(
+    title: str,
+    first_label: str,
+    first_value: int,
+    second_label: str,
+    second_value: int,
+    available: bool,
+) -> list[str]:
+    lines = [f"<b>{title}</b>"]
+    if not available:
+        lines.append("　<code>暂无可用采样</code>")
+        return lines
+    lines.extend(
+        [
+            f"{first_label}　<code>{format_bytes(first_value)}</code>",
+            f"{second_label}　<code>{format_bytes(second_value)}</code>",
+            f"∑ 合计　<code>{format_bytes(first_value + second_value)}</code>",
+        ]
+    )
+    return lines
+
+
+def daily_report_text(state: dict[str, Any], date_value: str) -> str:
+    record = day_record(state, date_value)
+    month_records = [
+        item[1] for item in records_for_month(state, date_value[:7], date_value)
     ]
-    active.sort(key=lambda group: int(group.get("day_count", 0)), reverse=True)
+    month_total = aggregate_days(month_records)
+    source_count = len(record["sources"])
+    connection_count = sum(nonnegative_int(item) for item in record["sources"].values())
     lines = [
-        "Hy2 每日连接汇总",
+        "<b>📊 Hy2 每日简报</b>",
+        f"<code>{date_value}</code> · 北京时间",
         "",
-        f"统计日期（北京时间）：{previous or '上一统计周期'}",
-        online_line(config),
+        *traffic_block(
+            "🔐 Hy2 代理流量",
+            "⬆️ 上传",
+            record["hy2_upload"],
+            "⬇️ 下载",
+            record["hy2_download"],
+            record["hy2_samples"] > 0,
+        ),
+        "",
+        *traffic_block(
+            "🖥️ VPS 网卡流量",
+            "📥 接收",
+            record["vps_receive"],
+            "📤 发送",
+            record["vps_send"],
+            record["vps_samples"] > 0,
+        ),
+        "",
+        f"📈 当月 Hy2　<code>{format_bytes(month_total['hy2_upload'] + month_total['hy2_download'])}</code>",
+        f"🟢 峰值在线　<b>{record['peak_online']}</b> 台设备",
+        f"🌐 来源网段　<b>{source_count}</b> 个",
+        f"🔁 成功连接　<b>{connection_count}</b> 次",
+        "",
+        "ℹ️ 两类流量口径不同；云厂商面板是计费准则",
     ]
-    if active:
-        lines.append("记录到的连接来源：")
-        for group in active[:20]:
-            lines.append(f"- {group['label']}：{int(group['day_count'])} 次连接")
-        if len(active) > 20:
-            lines.append(f"- 另有 {len(active) - 20} 个来源未展开")
-    else:
-        lines.append("上一统计周期没有记录到成功连接。")
-    queue_message(state, "daily", "\n".join(lines), now)
-    for group in state["groups"].values():
-        group["day_count"] = 0
-    state["last_daily_date"] = today
+    if state.get("reporting_started_date") == date_value:
+        lines.append("ℹ️ 当日数据从启用流量统计后开始")
+    return "\n".join(lines)
+
+
+def monthly_report_text(state: dict[str, Any], month: str) -> str:
+    records = records_for_month(state, month)
+    total = aggregate_days([item[1] for item in records])
+    sampled_days = [
+        item
+        for item in records
+        if nonnegative_int(item[1].get("hy2_samples")) > 0
+    ]
+    hy2_total = total["hy2_upload"] + total["hy2_download"]
+    daily_average = hy2_total // len(sampled_days) if sampled_days else 0
+    highest_date = ""
+    highest_value = 0
+    for date_value, record in sampled_days:
+        value = record["hy2_upload"] + record["hy2_download"]
+        if value >= highest_value:
+            highest_date = date_value
+            highest_value = value
+    lines = [
+        "<b>🗓️ Hy2 月度报告</b>",
+        f"<code>{month}</code> · 北京时间",
+        "",
+        *traffic_block(
+            "🔐 Hy2 代理流量",
+            "⬆️ 上传",
+            total["hy2_upload"],
+            "⬇️ 下载",
+            total["hy2_download"],
+            total["hy2_samples"] > 0,
+        ),
+        "",
+        *traffic_block(
+            "🖥️ VPS 网卡流量",
+            "📥 接收",
+            total["vps_receive"],
+            "📤 发送",
+            total["vps_send"],
+            total["vps_samples"] > 0,
+        ),
+        "",
+        (
+            f"📊 采样日均　<code>{format_bytes(daily_average)}</code>"
+            if sampled_days
+            else "📊 采样日均　<code>暂无数据</code>"
+        ),
+        (
+            f"🔥 最高单日　<code>{highest_date} · {format_bytes(highest_value)}</code>"
+            if sampled_days
+            else "🔥 最高单日　<code>暂无数据</code>"
+        ),
+        f"🟢 峰值在线　<b>{total['peak_online']}</b> 台设备",
+        f"🌐 来源网段　<b>{len(total['sources'])}</b> 个",
+        "",
+        "ℹ️ 两类流量口径不同；云厂商面板是计费准则",
+    ]
+    started = str(state.get("reporting_started_date", ""))
+    if started.startswith(month + "-") and started != month + "-01":
+        lines.append("ℹ️ 本月为启用流量统计后的部分数据")
+    return "\n".join(lines)
+
+
+def manual_report_text(state: dict[str, Any], now: float) -> str:
+    date_value = dt.datetime.fromtimestamp(now, BEIJING).date().isoformat()
+    record = day_record(state, date_value)
+    month_total = aggregate_days(
+        [item[1] for item in records_for_month(state, date_value[:7], date_value)]
+    )
+    return "\n".join(
+        [
+            "<b>📈 Hy2 当前流量</b>",
+            f"<code>{format_time(now)}</code> · 北京时间",
+            "",
+            *traffic_block(
+                "🔐 今日 Hy2",
+                "⬆️ 上传",
+                record["hy2_upload"],
+                "⬇️ 下载",
+                record["hy2_download"],
+                record["hy2_samples"] > 0,
+            ),
+            "",
+            *traffic_block(
+                "🖥️ 今日 VPS",
+                "📥 接收",
+                record["vps_receive"],
+                "📤 发送",
+                record["vps_send"],
+                record["vps_samples"] > 0,
+            ),
+            "",
+            f"📅 本月 Hy2　<code>{format_bytes(month_total['hy2_upload'] + month_total['hy2_download'])}</code>",
+            f"🟢 今日峰值　<b>{record['peak_online']}</b> 台设备",
+            f"🌐 今日来源　<b>{len(record['sources'])}</b> 个网段",
+            "",
+            "ℹ️ VPS 网卡与 Hy2 统计口径不同，不能直接相减",
+        ]
+    )
+
+
+def queue_scheduled_reports(
+    state: dict[str, Any], now: float
+) -> None:
+    local = dt.datetime.fromtimestamp(now, BEIJING)
+    today = local.date()
+    yesterday = (today - dt.timedelta(days=1)).isoformat()
+    daily_ready = (local.hour, local.minute) >= (REPORT_HOUR, REPORT_MINUTE)
+    if daily_ready and state.get("last_daily_report") != yesterday:
+        if str(state.get("reporting_started_date", today.isoformat())) <= yesterday:
+            queue_message(
+                state,
+                f"daily:{yesterday}",
+                daily_report_text(state, yesterday),
+                now,
+                silent=True,
+            )
+        state["last_daily_report"] = yesterday
+
+    monthly_ready = (local.hour, local.minute) >= (
+        REPORT_HOUR,
+        MONTHLY_REPORT_MINUTE,
+    )
+    previous_month_date = today.replace(day=1) - dt.timedelta(days=1)
+    previous_month = previous_month_date.strftime("%Y-%m")
+    if monthly_ready and state.get("last_monthly_report") != previous_month:
+        started = str(state.get("reporting_started_date", today.isoformat()))
+        if (
+            records_for_month(state, previous_month)
+            or started <= previous_month_date.isoformat()
+        ):
+            queue_message(
+                state,
+                f"monthly:{previous_month}",
+                monthly_report_text(state, previous_month),
+                now,
+                silent=True,
+            )
+        state["last_monthly_report"] = previous_month
+
+
+def queue_manual_report(
+    state: dict[str, Any], now: float
+) -> None:
+    queue_message(
+        state,
+        f"manual:{int(now)}",
+        manual_report_text(state, now),
+        now,
+    )
+
+
+def prune_traffic_days(state: dict[str, Any], now: float) -> None:
+    cutoff = (
+        dt.datetime.fromtimestamp(now, BEIJING).date()
+        - dt.timedelta(days=TRAFFIC_DAY_RETENTION)
+    ).isoformat()
+    days = state["traffic"]["days"]
+    for date_value in list(days):
+        if date_value < cutoff:
+            del days[date_value]
+    if len(days) > TRAFFIC_DAY_RETENTION:
+        for date_value in sorted(days)[: len(days) - TRAFFIC_DAY_RETENTION]:
+            del days[date_value]
 
 
 def prune_state(state: dict[str, Any], now: float) -> None:
@@ -1538,7 +2159,12 @@ def flush_outbox(
     sent = 0
     for key in ordered:
         try:
-            send_message(config, str(state["outbox"][key]["text"]))
+            item = state["outbox"][key]
+            send_message(
+                config,
+                str(item["text"]),
+                silent=bool(item.get("silent", False)),
+            )
         except Exception as exc:  # Telegram/network errors must not stop Hysteria.
             log(f"Telegram 发送失败，将在 5 分钟后重试：{type(exc).__name__}")
             return now + 300
@@ -1577,10 +2203,24 @@ def start_journal() -> subprocess.Popen[str]:
     )
 
 
+manual_report_requested = False
+
+
+def request_manual_report(_signum: int, _frame: Any) -> None:
+    global manual_report_requested
+    manual_report_requested = True
+
+
 def main() -> int:
+    global manual_report_requested
     state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     config = load_config()
     state = load_state()
+    signal.signal(signal.SIGUSR1, request_manual_report)
+    now = time.time()
+    sample_traffic(state, config, now)
+    atomic_write_json(state_path, state)
+    next_sample = now + TRAFFIC_SAMPLE_SECONDS
     process = start_journal()
     if process.stdout is None:
         raise RuntimeError("journalctl stdout is unavailable")
@@ -1609,9 +2249,16 @@ def main() -> int:
                 atomic_write_json(state_path, state)
 
         now = time.time()
+        if now >= next_sample or manual_report_requested:
+            sample_traffic(state, config, now)
+            next_sample = now + TRAFFIC_SAMPLE_SECONDS
+        if manual_report_requested:
+            queue_manual_report(state, now)
+            manual_report_requested = False
         queue_hourly_summaries(state, config, now)
-        queue_daily_summary(state, config, now)
+        queue_scheduled_reports(state, now)
         prune_state(state, now)
+        prune_traffic_days(state, now)
         atomic_write_json(state_path, state)
         retry_after = flush_outbox(state, config, retry_after)
 
@@ -1633,7 +2280,7 @@ PY
 write_notifier_unit() {
   cat >"$NOTIFIER_SERVICE_PATH" <<EOF
 [Unit]
-Description=Rate-limited Telegram alerts for Hysteria 2 connections
+Description=Telegram alerts and traffic reports for Hysteria 2
 Documentation=https://core.telegram.org/bots/api
 Requires=hysteria-server.service
 PartOf=hysteria-server.service
@@ -1935,7 +2582,11 @@ url = f"https://api.telegram.org/bot{token}/sendMessage"
 data = urllib.parse.urlencode(
     {
         "chat_id": chat_id,
-        "text": "hy2-safe：Telegram 凭据验证成功，正在启用连接提醒。",
+        "text": (
+            "<b>✅ hy2-safe 验证成功</b>\n\n"
+            "连接提醒、流量日报和月报将发送到此私人聊天。"
+        ),
+        "parse_mode": "HTML",
         "protect_content": "true",
     }
 ).encode("utf-8")
@@ -2006,7 +2657,11 @@ url = f"https://api.telegram.org/bot{token}/sendMessage"
 data = urllib.parse.urlencode(
     {
         "chat_id": chat_id,
-        "text": "hy2-safe：Telegram 连接提醒测试成功。",
+        "text": (
+            "<b>✅ hy2-safe 通知正常</b>\n\n"
+            "连接提醒与流量统计服务可以向此私人聊天发送消息。"
+        ),
+        "parse_mode": "HTML",
         "protect_content": "true",
     }
 ).encode("utf-8")
@@ -2465,8 +3120,8 @@ command_telegram_setup() {
     die "Telegram 提醒启用失败，已恢复原配置。"
   fi
 
-  info "Telegram 连接提醒已启用，只会向 Chat ID ${TELEGRAM_CHAT_ID} 主动发送消息。"
-  printf '规则：新 IP 网段立即提醒；相同网段一小时内合并；每天发送一份汇总。\n'
+  info "Telegram 提醒已启用，只会向 Chat ID ${TELEGRAM_CHAT_ID} 主动发送消息。"
+  printf '规则：新 IP 网段立即提醒；相同网段一小时内合并；北京时间每天 08:00 静默发送前一日日报，每月 1 日 08:05 静默发送上月月报。\n'
 }
 
 command_telegram_replace() {
@@ -2493,6 +3148,18 @@ command_telegram_test() {
     die "Telegram 提醒尚未启用。"
   stored_telegram_send_test
   info "Telegram 测试消息发送成功。"
+}
+
+command_telegram_report() {
+  require_root
+  require_systemd
+  load_existing_settings || die "请先安装 Hy2。"
+  [[ "$TELEGRAM_ENABLED" -eq 1 && -f "$NOTIFIER_CONFIG_PATH" ]] ||
+    die "Telegram 提醒尚未启用。"
+  systemctl is-active --quiet "$NOTIFIER_NAME" ||
+    die "Telegram 提醒服务没有运行，请先执行 hy2-safe telegram-logs 检查。"
+  systemctl kill --kill-whom=main --signal=SIGUSR1 "$NOTIFIER_NAME"
+  info "已请求发送当前流量报告，通常会在 30 秒内送达。"
 }
 
 command_telegram_logs() {
@@ -2607,6 +3274,7 @@ command_status() {
   if [[ "${TELEGRAM_ENABLED:-0}" -eq 1 ]]; then
     if systemctl is-active --quiet "$NOTIFIER_NAME" 2>/dev/null; then
       printf 'Telegram 提醒：已开启并正在运行\n'
+      printf 'Telegram 流量报告：每天 08:00 报告前一日；每月 1 日 08:05 报告上月（北京时间、静默消息）\n'
     else
       printf 'Telegram 提醒：已配置但服务异常\n'
     fi
@@ -2772,9 +3440,10 @@ command_menu() {
   menu_item "7" "修改 Hy2 配置"
   menu_item "8" "立即检查更新（默认另有每周自动更新）"
   menu_item "9" "查看版本、服务和自动更新状态"
+  menu_item "10" "立即发送 Telegram 流量报告"
   menu_item "0" "退出"
   printf '\n'
-  prompt_input "请输入菜单编号 [0-9]: " choice
+  prompt_input "请输入菜单编号 [0-10]: " choice
   case "$choice" in
     1)
       if [[ -f "$SETTINGS_PATH" ]]; then
@@ -2808,6 +3477,12 @@ command_menu() {
       refresh_managed_runtime
       command_status
       ;;
+    10)
+      refresh_managed_runtime
+      configure_notifier_service ||
+        die "Telegram 提醒服务重载失败，请运行 hy2-safe telegram-logs。"
+      command_telegram_report
+      ;;
     0) info "已退出。" ;;
     *) die "无效选项：$choice" ;;
   esac
@@ -2835,6 +3510,7 @@ main() {
     logs) command_logs "$@" ;;
     telegram-setup) command_telegram_setup "$@" ;;
     telegram-test) command_telegram_test "$@" ;;
+    telegram-report) command_telegram_report "$@" ;;
     telegram-logs) command_telegram_logs "$@" ;;
     telegram-disable) command_telegram_disable "$@" ;;
     telegram-replace) command_telegram_replace "$@" ;;
