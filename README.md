@@ -42,12 +42,14 @@
 - 从 Hysteria 官方仓库安装最新稳定版。
 - 校验 GitHub Release 元数据、文件大小、Asset SHA-256、官方 `hashes.txt` 和二进制报告版本。
 - 使用自己的域名，由 Hysteria ACME 自动申请并续期公开可信证书。
-- 客户端保持证书验证，不设置 `insecure: true`。
+- 客户端保持官方默认的证书验证，分享链接明确输出 `insecure=0`。
+- 安装和修改前自动核对域名解析、本机公网地址、所选 ACME TCP 端口及 Hy2 UDP 端口冲突。
 - 默认开启原生 UDP 端口跳跃：`50000-50500`（共 501 个端口）。
 - 不硬编码客户端上传/下载 Mbps，使用较保守的自适应 BBR。
 - Hysteria 使用独立无登录权限账号运行；每次服务启动前都会检查密码锁定、登录 Shell 和 SSH 密钥入口。
 - 默认使用本机固定小页面作为伪装，不反向代理 Bing 等第三方大站。
-- 每周自动检查 Hysteria 官方稳定版，失败时恢复上一版本。
+- 每周自动检查 Hysteria 官方稳定版，失败时恢复上一版本；启用 Telegram 后会通知真正发生的更新和更新失败。
+- 每日检查 ACME 证书，匹配证书不足 21 天时通过日志和 Telegram 告警。
 - 输出官方客户端 YAML、官方分享链接及 v2rayN/v2rayNG 兼容链接。
 - 可选启用美化的 Telegram 成功连接提醒，并合并频繁重连消息；每台 VPS 可设置独立消息名称。
 - 每分钟在本机采样 Hy2 与 VPS 网卡计数；北京时间每天 `08:00` 静默发送前一日日报，每月 1 日 `08:05` 静默发送上月月报。
@@ -105,22 +107,24 @@ VPS 系统防火墙和云厂商安全组是两层不同的过滤：
 | 用途 | 协议 | 默认端口 |
 | --- | --- | --- |
 | SSH | TCP | 你的实际 SSH 端口 |
-| ACME 域名验证 | TCP | `80`、`443` |
+| ACME 域名验证（默认 HTTP-01） | TCP | `80` |
 | Hy2 端口跳跃 | UDP | `50000-50500` |
 
 如果没有任何默认拒绝规则，就不存在“先开放端口才能使用”的步骤；程序监听后公网即可访问。但这也意味着以后其他程序如果意外监听公网，不会被防火墙额外拦截。
 
 `hy2-safe` 不会清空、开启或重写你的系统防火墙，也无法修改云厂商控制台。Hysteria 为端口跳跃创建的临时重定向规则不等于默认拒绝防火墙中的“允许入站”规则。
 
+默认配置明确使用 ACME `http` 验证，因此只需要 TCP `80`，不占 TCP `443`。申请和续期时 Hysteria 会临时监听所选验证端口；平时 Hy2 数据仍走 UDP，但 TCP `80` 必须保持可用，不能同时由 Nginx、Caddy、Apache 等程序长期监听。若明确改用 `--acme-type tls`，则改为只需要 TCP `443`，TCP `80` 可以给其他程序使用；同理，TCP `443` 必须留给 ACME。
+
 ## 一行命令开始使用
 
 以 `root` 登录 VPS，复制下面一整行：
 
 ```bash
-apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh -o /root/hy2-safe.sh && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
+apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.0.7/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.0.7/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
 ```
 
-这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，然后保存脚本并执行本地文件；不是直接把网络内容通过管道交给 Shell。
+这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.0.7` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
 
 如果想先查看：
 
@@ -177,7 +181,7 @@ hy2-safe
 菜单如下：
 
 ```text
-hy2-safe v1.0.6 · Hysteria 2 管理菜单
+hy2-safe v1.0.7 · Hysteria 2 管理菜单
 
   1) 安装 Hy2
   2) 完整卸载 Hy2
@@ -190,10 +194,11 @@ hy2-safe v1.0.6 · Hysteria 2 管理菜单
   9) 查看版本、服务和自动更新状态
   10) 立即发送 Telegram 流量报告
   11) 设置 Telegram 消息名称
+  12) 一键重置 Hy2 密码
   0) 退出
 ```
 
-菜单一次执行一个操作。修改配置失败时，脚本会尝试恢复原配置；Hysteria 更新失败时，会尝试恢复上一版本。
+菜单一次执行一个操作。修改配置或密码轮换失败时，脚本会恢复原配置；Hysteria 更新失败时，会尝试恢复上一版本。
 
 交互界面使用一致的终端配色：菜单编号和输入提示为黄色，标题为青色，信息为绿色，警告为黄色，错误为红色。颜色只在交互式终端启用，不会污染自动更新日志或管道输出。临时关闭颜色：
 
@@ -254,6 +259,10 @@ socks5:
 ```
 
 脚本没有开启 `fastOpen`，因此保留 SOCKS5 的正常成功/失败语义；也没有关闭证书验证。
+
+Hysteria 官方客户端的 `tls.insecure` 默认值是 `false`。在 v2rayN/v2rayNG 中，`insecure=0`、关闭“允许不安全”或关闭“跳过证书验证”表达的是同一件事：验证证书链和域名。`hy2-safe` 使用真实域名申请公开可信证书，因此保持 `insecure=0`。
+
+一些旧脚本使用自签名证书、把 SNI 写成 Bing，再要求客户端 `insecure=1`。这种方式部署简单，但客户端不再验证自己连接的是不是你的服务器，遇到错误 DNS、恶意热点或中间人时缺少关键身份校验。就 TLS 身份安全而言，本脚本的公开可信证书加 `insecure=0` 明显更好；节点速度主要取决于线路和拥塞控制，关闭证书验证不会带来有意义的持续提速。
 
 ## 上传下载速度和 QoS
 
@@ -323,6 +332,21 @@ hy2-safe configure --port 443 --non-interactive
 ```
 
 这不是 Cloudflare Origin CA 证书。Cloudflare 在默认方案中只负责 DNS。
+
+默认服务端配置明确写入：
+
+```yaml
+acme:
+  type: http
+```
+
+这表示只使用 HTTP-01，即 TCP `80`。脚本不再依赖 Hysteria 的旧兼容模式同时准备 80 和 443。确实需要把 TCP 80 留给其他网站时，可以改成 TLS-ALPN-01：
+
+```bash
+hy2-safe configure --acme-type tls --non-interactive
+```
+
+此时只需要 TCP `443`，而且该端口不能再被其他程序同时监听。切换前脚本会检查所选 TCP 端口和全部 Hy2 UDP 端口；还会解析域名并尽量与本机公网 IPv4/IPv6 比对。发现小黄云、错误 A/AAAA 或端口冲突时会在写配置前停止，避免把正常服务改坏。
 
 服务端监听写法为 `:端口` 或 `:端口范围`，按照 Hysteria 官方定义会监听所有可用 IPv4 和 IPv6 接口。
 
@@ -501,7 +525,25 @@ hy2-safe-update.timer
 6. 原子替换程序并重启服务。
 7. 新版本启动失败时恢复上一版本。
 
+如果已启用 Telegram：
+
+- 只有核心版本真的发生变化并且服务恢复正常，才静默发送“更新完成”。
+- 下载、校验、替换、启动或回滚流程失败时，发送需要注意的“更新失败”。
+- 已经是最新版时不会每周重复发消息。
+
 菜单 `8) 立即检查更新` 只是马上手动检查一次，不会关闭每周自动更新。
+
+脚本还会启用：
+
+```text
+hy2-safe-health.timer
+```
+
+它每天检查 ACME 目录中是否存在与当前域名匹配、有效期超过 21 天的证书。健康时保持安静；缺失、域名不匹配或临近到期时写入日志，并在 Telegram 已启用时告警。手工检查：
+
+```bash
+hy2-safe certificate-check
+```
 
 > [!NOTE]
 > 自动更新只更新 Hysteria 官方核心，不会远程替换 `hy2-safe` 管理脚本。重新执行 README 的一行下载命令并打开菜单，执行普通管理操作时会同步最新管理脚本、服务账号权限和 systemd 单元；刷新本身不会主动重启正在运行的 Hy2。若恰好同时触发 Hysteria 核心更新，更新流程仍会按设计重启并检查服务。选择“完整卸载”时不会先做刷新。
@@ -547,7 +589,7 @@ hy2-safe
 
 - Hysteria 当前版本和回滚版本。
 - `hy2-safe` 管理脚本及推荐下载位置 `/root/hy2-safe.sh`。
-- systemd 服务和自动更新任务。
+- systemd 服务、自动更新任务和证书健康检查任务。
 - Hy2 服务端配置、密码和客户端信息。
 - ACME 证书和账户状态。
 - Telegram Bot Token 和通知状态。
@@ -566,7 +608,7 @@ hy2-safe
 重新安装时，再次执行 README 的一行命令即可。Hysteria 会重新验证域名并申请新证书。
 
 > [!WARNING]
-> 不要在短时间内反复完整卸载重装。删除 ACME 状态后会重新签发证书，可能触发 CA 频率限制。重新安装前先确认域名、灰云和 TCP 80/443 正确，避免连续验证失败。
+> 不要在短时间内反复完整卸载重装。删除 ACME 状态后会重新签发证书，可能触发 CA 频率限制。重新安装前先确认域名、灰云和当前选择的 ACME 端口正确（默认 TCP 80；`--acme-type tls` 时为 TCP 443），避免连续验证失败。
 
 ## 安全设计
 
@@ -643,6 +685,7 @@ hy2-safe
 | `/var/lib/private/hy2-safe-notifier` | Telegram 防刷屏、流量差值和日报/月报状态 |
 | `/etc/systemd/system/hysteria-server.service` | Hy2 服务 |
 | `/etc/systemd/system/hy2-safe-update.timer` | 每周自动更新 |
+| `/etc/systemd/system/hy2-safe-health.timer` | 每日证书健康检查 |
 | `/etc/systemd/system/hy2-safe-notifier.service` | Telegram 提醒服务 |
 
 ## 常用命令
@@ -665,6 +708,12 @@ hy2-safe configure
 
 # 立即检查 Hysteria 官方稳定版
 hy2-safe update
+
+# 自动生成新密码、回滚保护并立即显示新客户端配置
+hy2-safe rotate-password
+
+# 检查当前域名证书是否匹配且剩余超过 21 天
+hy2-safe certificate-check
 
 # 查看 Hy2 日志
 hy2-safe logs
@@ -743,8 +792,8 @@ rm -f /root/hy2-password
 
 - 域名没有解析到本机。
 - Cloudflare 开启了小黄云。
-- TCP 80/443 被系统防火墙或云防火墙阻挡。
-- 80/443 被 Nginx、Caddy、Apache 等程序占用。
+- 默认 HTTP-01 所需的 TCP 80 被系统防火墙或云防火墙阻挡；使用 `--acme-type tls` 时则检查 TCP 443。
+- 当前选择的 ACME TCP 端口被 Nginx、Caddy、Apache 等程序占用。脚本通常会在安装或修改前直接指出这一冲突。
 - 短时间连续失败或重新签发触发 CA 限制。
 
 修正后使用：
@@ -805,14 +854,13 @@ hy2-safe telegram-report
 - VPS 的 root 权限被入侵。
 - Telegram 或剪贴板同步泄露。
 
-怀疑泄露时应更换密码，并删除所有旧客户端配置：
+怀疑泄露时应立即选择菜单 `12) 一键重置 Hy2 密码`，或运行：
 
 ```bash
-openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n' > /root/hy2-new-password
-chmod 0600 /root/hy2-new-password
-hy2-safe configure --password-file /root/hy2-new-password --non-interactive
-rm -f /root/hy2-new-password
+hy2-safe rotate-password
 ```
+
+脚本要求输入 `ROTATE` 二次确认，自动生成新密码、重启并检查服务；失败会恢复旧配置。成功后所有旧客户端立即失效，必须使用屏幕上重新输出的新配置。
 
 ### hysteria 账号能不能 SSH 登录
 
@@ -841,6 +889,6 @@ rm -f /root/hy2-new-password
 
 ## 版本
 
-当前管理脚本正式版本：`v1.0.6`
+当前管理脚本正式版本：`v1.0.7`
 
 Release 页面：[elonjack/hy2-safe/releases](https://github.com/elonjack/hy2-safe/releases)

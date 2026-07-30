@@ -21,7 +21,7 @@ def forbid(pattern: str, message: str) -> None:
 
 
 require(r"^set -Eeuo pipefail$", "strict Bash mode is required")
-require(r'PROGRAM_VERSION="1\.0\.6"', "the release must expose its manager version")
+require(r'PROGRAM_VERSION="1\.0\.7"', "the release must expose its manager version")
 require(r"require_supported_os", "installations must be limited to Debian 12/13")
 require(r"sha256sum", "release binaries must be checksum-verified")
 require(r"release_asset_field", "release metadata must be parsed structurally")
@@ -135,6 +135,20 @@ require(r"管理脚本、服务账号权限和 systemd 单元已同步", "runtim
 require(r"当前 Hysteria 2 版本", "status output must show the installed Hysteria version first")
 require(r"OnCalendar=weekly", "automatic updates must run weekly")
 require(r"Persistent=true", "missed automatic update runs must be caught up")
+require(r'printf \'  type: "%s"\\n\\n\' "\$ACME_TYPE"', "ACME challenge type must be explicit")
+require(r'ACME_TYPE="http"', "fresh installs must default to HTTP-01 on TCP 80 only")
+require(r"preflight_domain", "install and configure must preflight public DNS")
+require(r"preflight_ports", "install and configure must preflight TCP/UDP conflicts")
+require(r"ss -H -lnt", "ACME TCP conflicts must be detected before changes")
+require(r"ss -H -lun", "Hy2 UDP conflicts must be detected before changes")
+require(r"OnCalendar=\*-\*-\* 09:00", "certificate health must be checked daily")
+require(r"certificate-warning", "certificate expiry failures must support Telegram alerts")
+require(r"update-failed", "failed Hysteria updates must support Telegram alerts")
+require(r"update-success", "successful version changes must support Telegram alerts")
+require(r"一键重置 Hy2 密码", "the menu must expose safe password rotation")
+require(r"command_rotate_password", "password rotation must have a dedicated command")
+require(r"正在恢复旧配置", "password rotation failures must roll back")
+require(r"HY2_SAFE_SOURCE_ONLY", "Debian smoke tests must be able to source helpers safely")
 require(r"确认完整卸载请输入 DELETE", "full uninstall must require destructive confirmation")
 require(r"反复完整卸载重装.*频率限制", "full uninstall must warn about ACME reissuance limits")
 require(r'"\$DEFAULT_DOWNLOAD_PATH"', "full uninstall must remove the recommended downloaded script")
@@ -234,9 +248,31 @@ aggregate_days = namespace["aggregate_days"]
 records_for_month = namespace["records_for_month"]
 format_bytes = namespace["format_bytes"]
 send_message = namespace["send_message"]
+drain_journal = namespace["drain_journal"]
 hy2_traffic_totals = namespace["hy2_traffic_totals"]
 network_counters = namespace["network_counters"]
 namespace["online_line"] = lambda _config: "当前在线客户端：1"
+
+
+class PipeProcess:
+    def __init__(self, stream):
+        self.stdout = stream
+
+
+read_fd, write_fd = os.pipe()
+os.set_blocking(read_fd, False)
+burst = b"".join(
+    json.dumps({"MESSAGE": f"client connected {index}"}).encode("utf-8") + b"\n"
+    for index in range(25)
+)
+os.write(write_fd, burst)
+os.close(write_fd)
+with os.fdopen(read_fd, "rb", buffering=0) as stream:
+    journal_buffer, journal_entries, journal_eof = drain_journal(
+        PipeProcess(stream), b""
+    )
+if journal_buffer or len(journal_entries) != 25 or not journal_eof:
+    raise AssertionError("burst journal records must be drained without buffering delays")
 
 class LegacyConfigPath:
     def read_text(self, encoding: str) -> str:
@@ -496,7 +532,7 @@ if README.count("```") % 2:
     raise AssertionError("README fenced code blocks must be balanced")
 if "[!IMPORTANT]" not in README or "[!WARNING]" not in README:
     raise AssertionError("README must make the main safety warnings prominent")
-if "hy2-safe v1.0.6 · Hysteria 2 管理菜单" not in README:
+if "hy2-safe v1.0.7 · Hysteria 2 管理菜单" not in README:
     raise AssertionError("README menu version must match the release")
 if "/etc/hysteria/hy2-safe-account.env" not in README:
     raise AssertionError("README must explain the account ownership record")
