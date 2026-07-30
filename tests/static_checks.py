@@ -1,4 +1,5 @@
 from pathlib import Path
+import datetime as dt
 import os
 import re
 
@@ -19,7 +20,7 @@ def forbid(pattern: str, message: str) -> None:
 
 
 require(r"^set -Eeuo pipefail$", "strict Bash mode is required")
-require(r'PROGRAM_VERSION="1\.0\.4"', "the release must expose its manager version")
+require(r'PROGRAM_VERSION="1\.0\.5"', "the release must expose its manager version")
 require(r"require_supported_os", "installations must be limited to Debian 12/13")
 require(r"sha256sum", "release binaries must be checksum-verified")
 require(r"release_asset_field", "release metadata must be parsed structurally")
@@ -76,7 +77,21 @@ require(r"DynamicUser=yes", "the notifier must use an isolated dynamic user")
 require(r"SupplementaryGroups=systemd-journal", "the notifier needs read-only journal access")
 require(r"PartOf=hysteria-server\.service", "the notifier must restart with Hysteria")
 require(r"protect_content.*true", "Telegram messages must request content protection")
+require(r'"parse_mode": "HTML"', "Telegram notices must use structured HTML formatting")
+require(r'"disable_notification": "true" if silent else "false"', "scheduled reports must support silent delivery")
 require(r"HOURLY_SECONDS = 3600", "reconnect alerts must be rate-limited")
+require(r"TRAFFIC_SAMPLE_SECONDS = 60", "traffic sampling must remain lightweight")
+require(r'stats_json\(config, "/traffic"\)', "reports must use Hysteria's official local traffic API")
+forbid(r"/traffic\?clear=1", "traffic reporting must not clear official counters")
+require(r'Path\("/sys/class/net"\)', "VPS totals must use kernel interface counters")
+require(r'Path\("/proc/net/route"\)', "VPS totals must prefer default-route interfaces")
+forbid(r"\btcpdump\b", "traffic reporting must never capture packets")
+require(r'"version": 2', "notifier traffic state must be versioned")
+require(r"if version == 1:", "v1 notifier state must migrate forward")
+require(r"REPORT_HOUR = 8", "daily reports must use the documented Beijing schedule")
+require(r"MONTHLY_REPORT_MINUTE = 5", "monthly reports must follow the daily report")
+require(r"telegram-report\) command_telegram_report", "manual traffic reports need a direct command")
+require(r"--signal=SIGUSR1", "manual reports must signal only the running notifier")
 require(r'f"v4:\{network\.network_address\}/24"', "IPv4 alerts must group by /24")
 require(r'f"v6:\{network\.network_address\}/48"', "IPv6 alerts must group by /48")
 require(r"--token-file FILE --chat-id ID", "Telegram setup must support a secret token file")
@@ -204,6 +219,16 @@ extract_connection = namespace["extract_connection"]
 process_connection = namespace["process_connection"]
 queue_hourly_summaries = namespace["queue_hourly_summaries"]
 default_state = namespace["default_state"]
+normalize_state = namespace["normalize_state"]
+counter_delta = namespace["counter_delta"]
+sample_traffic = namespace["sample_traffic"]
+queue_scheduled_reports = namespace["queue_scheduled_reports"]
+monthly_report_text = namespace["monthly_report_text"]
+manual_report_text = namespace["manual_report_text"]
+format_bytes = namespace["format_bytes"]
+send_message = namespace["send_message"]
+hy2_traffic_totals = namespace["hy2_traffic_totals"]
+network_counters = namespace["network_counters"]
 namespace["online_line"] = lambda _config: "当前在线客户端：1"
 
 v4_key, v4_label = hidden_ip_group(parse_remote_ip("123.45.67.89:443"))
@@ -268,13 +293,147 @@ process_connection(state, config, "123.45.67.91:6789", 100000.0)
 if "returned:v4:123.45.67.0/24" not in state["outbox"]:
     raise AssertionError("a /24 returning after 24 hours must alert again")
 
+beijing = dt.timezone(dt.timedelta(hours=8))
+sample_time = dt.datetime(2026, 7, 30, 12, 0, tzinfo=beijing).timestamp()
+migrated = normalize_state(
+    {
+        "version": 1,
+        "last_daily_date": "2026-07-30",
+        "groups": state["groups"],
+        "outbox": {
+            "old": {
+                "text": "old alert",
+                "created": sample_time,
+            }
+        },
+    },
+    sample_time,
+)
+if migrated["version"] != 2 or not migrated["groups"]:
+    raise AssertionError("v1 notifier state must migrate without losing groups")
+if migrated["outbox"]["old"]["silent"]:
+    raise AssertionError("migrated connection alerts must remain audible")
+if migrated["reporting_started_date"] != "2026-07-30":
+    raise AssertionError("traffic accounting must start on the migration date")
+
+if counter_delta(None, 100) != 0:
+    raise AssertionError("the first traffic counter sample must be a baseline")
+if counter_delta(100, 175) != 75:
+    raise AssertionError("monotonic traffic counters must add only their delta")
+if counter_delta(100, 25) != 25:
+    raise AssertionError("reset traffic counters must restart from their current value")
+if format_bytes(1024**3) != "1.00 GiB":
+    raise AssertionError("traffic sizes must use unambiguous IEC units")
+
+telegram_fields = {}
+namespace["telegram_call"] = lambda _config, _method, fields: telegram_fields.update(
+    fields
+)
+send_message({"chat_id": "1"}, "<b>report</b>", silent=True)
+if (
+    telegram_fields.get("parse_mode") != "HTML"
+    or telegram_fields.get("disable_notification") != "true"
+    or telegram_fields.get("protect_content") != "true"
+):
+    raise AssertionError("formatted silent Telegram reports must stay protected")
+
+namespace["stats_json"] = lambda _config, path: (
+    {
+        "user": {"tx": 1200, "rx": 3400},
+        "other": {"tx": 50, "rx": 60},
+    }
+    if path == "/traffic"
+    else {}
+)
+if hy2_traffic_totals({}) != {"upload": 1250, "download": 3460}:
+    raise AssertionError("official per-client traffic values must be summed correctly")
+
+if os.name == "posix" and Path("/proc/net/route").exists():
+    detected_counters = network_counters()
+    if not detected_counters:
+        raise AssertionError("the Linux default-route interface must be measurable")
+    for interface, counters in detected_counters.items():
+        if (
+            not interface
+            or counters["receive"] < 0
+            or counters["send"] < 0
+        ):
+            raise AssertionError("Linux interface counters must be non-negative")
+
+traffic_state = default_state(sample_time)
+hy2_sample = {"upload": 1000, "download": 2000}
+nic_sample = {"eth0": {"receive": 4000, "send": 5000}}
+namespace["hy2_traffic_totals"] = lambda _config: dict(hy2_sample)
+namespace["network_counters"] = lambda: {
+    key: dict(value) for key, value in nic_sample.items()
+}
+namespace["online_count"] = lambda _config: 1
+sample_traffic(traffic_state, {}, sample_time)
+first_day = traffic_state["traffic"]["days"]["2026-07-30"]
+if first_day["hy2_upload"] or first_day["vps_receive"]:
+    raise AssertionError("initial samples must not count pre-install traffic")
+
+hy2_sample.update(upload=1600, download=2900)
+nic_sample["eth0"].update(receive=4700, send=6200)
+namespace["online_count"] = lambda _config: 3
+sample_traffic(traffic_state, {}, sample_time + 60)
+if (
+    first_day["hy2_upload"],
+    first_day["hy2_download"],
+    first_day["vps_receive"],
+    first_day["vps_send"],
+) != (600, 900, 700, 1200):
+    raise AssertionError("Hy2 and VPS traffic deltas must be accumulated separately")
+if first_day["peak_online"] != 3:
+    raise AssertionError("daily peak online devices must be retained")
+
+hy2_sample.update(upload=100, download=200)
+nic_sample["eth0"].update(receive=50, send=80)
+sample_traffic(traffic_state, {}, sample_time + 120)
+if (
+    first_day["hy2_upload"],
+    first_day["hy2_download"],
+    first_day["vps_receive"],
+    first_day["vps_send"],
+) != (700, 1100, 750, 1280):
+    raise AssertionError("counter resets must not create negatives or giant spikes")
+
+before_report = dt.datetime(2026, 7, 31, 7, 59, tzinfo=beijing).timestamp()
+queue_scheduled_reports(traffic_state, before_report)
+if any(key.startswith("daily:") for key in traffic_state["outbox"]):
+    raise AssertionError("daily reports must not be sent before 08:00 Beijing time")
+daily_time = dt.datetime(2026, 7, 31, 8, 0, tzinfo=beijing).timestamp()
+queue_scheduled_reports(traffic_state, daily_time)
+daily_item = traffic_state["outbox"].get("daily:2026-07-30")
+if daily_item is None or not daily_item["silent"]:
+    raise AssertionError("the previous-day report must be queued silently at 08:00")
+queue_scheduled_reports(traffic_state, daily_time + 60)
+if len([key for key in traffic_state["outbox"] if key.startswith("daily:")]) != 1:
+    raise AssertionError("daily reports must be idempotent")
+
+monthly_before = dt.datetime(2026, 8, 1, 8, 4, tzinfo=beijing).timestamp()
+queue_scheduled_reports(traffic_state, monthly_before)
+if "monthly:2026-07" in traffic_state["outbox"]:
+    raise AssertionError("monthly reports must not be sent before 08:05")
+monthly_time = dt.datetime(2026, 8, 1, 8, 5, tzinfo=beijing).timestamp()
+queue_scheduled_reports(traffic_state, monthly_time)
+monthly_item = traffic_state["outbox"].get("monthly:2026-07")
+if monthly_item is None or not monthly_item["silent"]:
+    raise AssertionError("the previous-month report must be queued silently at 08:05")
+if "Hy2 月度报告" not in monthly_report_text(traffic_state, "2026-07"):
+    raise AssertionError("monthly report formatting is missing")
+if "VPS 网卡与 Hy2 统计口径不同" not in manual_report_text(
+    traffic_state, monthly_time
+):
+    raise AssertionError("manual reports must explain the incompatible traffic scopes")
+
 if not README.startswith("# hy2-safe\n"):
     raise AssertionError("README must start with one H1 project title")
 if README.count("```") % 2:
     raise AssertionError("README fenced code blocks must be balanced")
 if "[!IMPORTANT]" not in README or "[!WARNING]" not in README:
     raise AssertionError("README must make the main safety warnings prominent")
-if "hy2-safe v1.0.4 · Hysteria 2 管理菜单" not in README:
+if "hy2-safe v1.0.5 · Hysteria 2 管理菜单" not in README:
     raise AssertionError("README menu version must match the release")
 if "/etc/hysteria/hy2-safe-account.env" not in README:
     raise AssertionError("README must explain the account ownership record")

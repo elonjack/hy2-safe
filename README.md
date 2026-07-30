@@ -6,7 +6,7 @@
 
 面向 Debian 12/13 的 Hysteria 2 服务端一键安装与管理脚本。
 
-它使用你自己的域名和公开可信证书，默认开启 UDP 端口跳跃、每周自动更新 Hysteria 2，并可选启用 Telegram 成功连接提醒。本文按 `root` 用户编写，命令不需要添加 `sudo`。
+它使用你自己的域名和公开可信证书，默认开启 UDP 端口跳跃、每周自动更新 Hysteria 2，并可选启用 Telegram 成功连接提醒、每日流量简报和月度报告。本文按 `root` 用户编写，命令不需要添加 `sudo`。
 
 > [!IMPORTANT]
 > 本项目会尽量减少常见配置错误和权限风险，但任何脚本都不能承诺“绝对没有漏洞”“永远不会被封”或“运营商一定不做 UDP QoS”。安装后仍需及时更新 Debian、保护 SSH、保管好 Hy2 密码和 Telegram Bot Token。
@@ -25,7 +25,7 @@
 - [端口跳跃](#端口跳跃)
 - [域名、证书和双栈](#域名证书和双栈)
 - [伪装页面](#伪装页面)
-- [Telegram 连接提醒](#telegram-连接提醒)
+- [Telegram 连接与流量提醒](#telegram-连接与流量提醒)
 - [版本和自动更新](#版本和自动更新)
 - [hysteria 服务账号是什么](#hysteria-服务账号是什么)
 - [完整卸载与重新安装](#完整卸载与重新安装)
@@ -49,7 +49,8 @@
 - 默认使用本机固定小页面作为伪装，不反向代理 Bing 等第三方大站。
 - 每周自动检查 Hysteria 官方稳定版，失败时恢复上一版本。
 - 输出官方客户端 YAML、官方分享链接及 v2rayN/v2rayNG 兼容链接。
-- 可选启用 Telegram 成功连接提醒，并合并频繁重连消息。
+- 可选启用美化的 Telegram 成功连接提醒，并合并频繁重连消息。
+- 每分钟在本机采样 Hy2 与 VPS 网卡计数；北京时间每天 `08:00` 静默发送前一日日报，每月 1 日 `08:05` 静默发送上月月报。
 - 提供中文菜单完成安装、修改、更新、查看版本、Telegram 管理和完整卸载。
 - 所有交互提示明确写出回车默认值，并提供可关闭、不会污染日志的规范终端配色。
 
@@ -154,7 +155,7 @@ chmod 0700 /root/hy2-safe.sh
 | UDP 跳跃端口范围 | 直接回车，默认 `50000-50500` |
 | 自定义 HTTPS 伪装站点 | 直接回车，使用本机固定小页面 |
 | 每周自动更新 | 直接回车，默认开启 |
-| Telegram 提醒 | 需要时输入 `y`，暂时不需要直接回车 |
+| Telegram 提醒与流量报告 | 需要时输入 `y`，暂时不需要直接回车 |
 
 Hy2 密码由系统密码学随机源自动生成。不要把客户端分享链接、密码或 Telegram Token 发到公开群、截图或 GitHub。
 
@@ -175,7 +176,7 @@ hy2-safe
 菜单如下：
 
 ```text
-hy2-safe v1.0.4 · Hysteria 2 管理菜单
+hy2-safe v1.0.5 · Hysteria 2 管理菜单
 
   1) 安装 Hy2
   2) 完整卸载 Hy2
@@ -186,6 +187,7 @@ hy2-safe v1.0.4 · Hysteria 2 管理菜单
   7) 修改 Hy2 配置
   8) 立即检查更新（默认另有每周自动更新）
   9) 查看版本、服务和自动更新状态
+  10) 立即发送 Telegram 流量报告
   0) 退出
 ```
 
@@ -355,9 +357,9 @@ hy2-safe configure --static-masquerade --non-interactive
 
 自定义反代目标必须是公开 HTTPS 域名，不能解析到私网、环回或保留地址，也不能与 Hy2 域名相同。反代站点的 DNS 以后发生变化仍可能改变风险，因此不需要真实站点时优先使用默认模式。
 
-## Telegram 连接提醒
+## Telegram 连接与流量提醒
 
-Telegram 功能默认关闭。它只监听 Hysteria 的“认证成功连接”日志，不参与 Hy2 密码验证；Telegram 网络故障不会阻止 Hy2 服务运行。
+Telegram 功能默认关闭。启用后，同一个 Bot 和同一个隔离服务负责连接提醒、流量日报与月报，不需要再创建第二个机器人。它不参与 Hy2 密码验证；Telegram 网络故障不会阻止 Hy2 服务运行。
 
 ### 添加提醒
 
@@ -377,11 +379,41 @@ Telegram 功能默认关闭。它只监听 Hysteria 的“认证成功连接”�
 - 新的 IPv4 `/24` 或 IPv6 `/48` 来源：立即提醒。
 - 同一网段短时间频繁重连：一小时合并一次。
 - 超过 24 小时没有出现后再次连接：重新提醒。
-- 每天发送一份汇总。
+- 北京时间每天 `08:00` 静默发送前一日 `00:00:00-23:59:59` 的完整日报。
+- 每月 1 日 `08:05` 静默发送上一个自然月的月报。
 - IPv4 显示为 `123.45.67.*`。
 - IPv6 只显示前 48 bit，例如 `2408:8215:1234:*`。
 
 “隐藏”表示消息中不显示完整 IP，不代表服务器日志中不存在原始连接地址。
+
+连接提醒使用适合手机窄屏阅读的 HTML 排版，只显示已隐藏的来源、北京时间和在线设备数。日报和月报使用静默消息，连接安全提醒保持普通通知。
+
+### 流量报告统计什么
+
+每份报告同时显示两套不能直接相减的数字：
+
+| 项目 | 数据来源 | 适合判断 |
+| --- | --- | --- |
+| Hy2 代理流量 | Hysteria 官方本机 `/traffic` 接口 | 节点实际代理用量、是否可能被偷用 |
+| VPS 网卡流量 | Linux 默认路由网卡的 `rx_bytes`/`tx_bytes` | 整台机器网络消耗趋势 |
+
+Hy2 报告以客户端视角显示上传和下载。VPS 网卡统计还包含 SSH、系统更新、证书申请等流量，而且代理数据会经过“客户端到 VPS”和“VPS 到目标网站”两段，因此 VPS 网卡总量通常会比 Hy2 应用层总量大，不能把二者简单相减。
+
+云厂商面板仍是套餐计费的最终依据：不同厂商可能只计算出站、双向计算或采用不同单位，脚本无法完全复制 CloudCone 等厂商的计费口径。
+
+统计程序每 60 秒读取一次 `127.0.0.1` 的小型 JSON 和 Linux 计数文件，不抓包、不保存访问目标或流量内容，也不会为了统计向公网发送探测流量。它不调用 `/traffic?clear=1`，不会清空 Hysteria 的官方计数；本地只保存每次差值。Hysteria、VPS 或网卡重启导致计数归零时，会从新计数重新累计，避免负数或巨大异常值。
+
+日报按北京时间自然日归档，但它是每分钟采样形成的运维统计，不是逐包计费账本；跨越零点的少量流量可能落在相邻一天。月度趋势不受明显影响，套餐结算仍应以云厂商面板为准。状态文件最多保留约 70 天的日记录，足够生成当前月和上一个月报告，避免长期运行后无限增长。
+
+流量统计从升级或首次启用该功能后的第一笔采样开始，不伪造升级前的历史数据。因此第一份日报或第一个月报可能只覆盖部分时间，并会在消息中说明。
+
+立即查看“今天截至当前”和“本月至今”的统计：
+
+```bash
+hy2-safe telegram-report
+```
+
+也可以运行 `hy2-safe`，选择 `10) 立即发送 Telegram 流量报告`。请求通常在 30 秒内发送。
 
 ### 更换机器人
 
@@ -408,6 +440,7 @@ hy2-safe telegram-disable
 - Bot Token 保存在 root-only 的 `0600` 文件中。
 - systemd 通过凭据目录把 Token 交给隔离的动态用户。
 - Hysteria 流量统计 API 只监听 `127.0.0.1`，并使用随机密钥。
+- VPS 网卡统计只读取默认路由接口的累计字节数，不抓取数据包或访问目标。
 - 提醒只发送给配置时确认的固定私人 Chat ID。
 - 不知道 Chat ID 时使用 64 bit 随机一次性配对码，并要求唯一匹配。
 - 交互设置必须人工确认收到测试消息，避免输错 Chat ID 后把提醒发给别人。
@@ -563,7 +596,7 @@ hy2-safe
 以下内容本来就需要交给对应服务才能工作：
 
 - 域名和 ACME 邮箱会交给证书机构申请公开可信证书。
-- 启用 Telegram 后，Bot Token、固定 Chat ID、已隐藏部分地址的客户端 IP 和提醒时间会通过 Telegram Bot API 处理。
+- 启用 Telegram 后，Bot Token、固定 Chat ID、已隐藏部分地址的客户端 IP、提醒时间、Hy2 汇总流量和 VPS 网卡汇总流量会通过 Telegram Bot API 处理。
 - 下载和自动更新会访问 Hysteria 官方 GitHub Release。
 
 需要自己注意：
@@ -586,7 +619,7 @@ hy2-safe
 | `/etc/hysteria/telegram-notifier.json` | root-only Telegram 凭据 |
 | `/var/lib/hysteria/acme` | ACME 证书和账户状态 |
 | `/usr/local/libexec/hy2-safe-notifier.py` | Telegram 提醒程序 |
-| `/var/lib/private/hy2-safe-notifier` | Telegram 防刷屏状态 |
+| `/var/lib/private/hy2-safe-notifier` | Telegram 防刷屏、流量差值和日报/月报状态 |
 | `/etc/systemd/system/hysteria-server.service` | Hy2 服务 |
 | `/etc/systemd/system/hy2-safe-update.timer` | 每周自动更新 |
 | `/etc/systemd/system/hy2-safe-notifier.service` | Telegram 提醒服务 |
@@ -623,6 +656,9 @@ hy2-safe telegram-replace
 
 # 发送 Telegram 测试消息
 hy2-safe telegram-test
+
+# 立即发送当前流量报告
+hy2-safe telegram-report
 
 # 查看 Telegram 提醒日志
 hy2-safe telegram-logs
@@ -708,6 +744,7 @@ hy2-safe logs
 
 ```bash
 hy2-safe telegram-test
+hy2-safe telegram-report
 hy2-safe telegram-logs
 hy2-safe status
 ```
@@ -721,6 +758,16 @@ hy2-safe status
 - 你没有把机器人改成 webhook 专用机器人。
 - VPS 可以访问 `api.telegram.org`。
 - 提醒服务正在运行。
+
+### 流量报告显示 0 或“暂无可用采样”
+
+升级后的第一次读取只建立安全基线，不会把安装前或开机前的历史网卡计数误算进来。实际通过 Hy2 访问网页后等待约 1-2 分钟，再运行：
+
+```bash
+hy2-safe telegram-report
+```
+
+如果 Hy2 流量始终显示暂无数据，检查 `hy2-safe status` 和 `hy2-safe telegram-logs`。VPS 网卡显示暂无数据通常表示系统没有可识别的默认路由接口；这不会影响 Hy2 服务本身。CloudCone 等云厂商的套餐用量仍以厂商面板为准。
 
 ### 会不会被别人偷跑流量
 
@@ -767,6 +814,6 @@ rm -f /root/hy2-new-password
 
 ## 版本
 
-当前管理脚本正式版本：`v1.0.4`
+当前管理脚本正式版本：`v1.0.5`
 
 Release 页面：[elonjack/hy2-safe/releases](https://github.com/elonjack/hy2-safe/releases)
