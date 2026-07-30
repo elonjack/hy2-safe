@@ -19,7 +19,7 @@ def forbid(pattern: str, message: str) -> None:
 
 
 require(r"^set -Eeuo pipefail$", "strict Bash mode is required")
-require(r'PROGRAM_VERSION="1\.0\.2"', "the release must expose its manager version")
+require(r'PROGRAM_VERSION="1\.0\.3"', "the release must expose its manager version")
 require(r"require_supported_os", "installations must be limited to Debian 12/13")
 require(r"sha256sum", "release binaries must be checksum-verified")
 require(r"release_asset_field", "release metadata must be parsed structurally")
@@ -80,14 +80,14 @@ require(r"HOURLY_SECONDS = 3600", "reconnect alerts must be rate-limited")
 require(r'f"v4:\{network\.network_address\}/24"', "IPv4 alerts must group by /24")
 require(r'f"v6:\{network\.network_address\}/48"', "IPv6 alerts must group by /48")
 require(r"--token-file FILE --chat-id ID", "Telegram setup must support a secret token file")
-require(r"如果知道自己的私人 Chat ID，请输入", "interactive Telegram setup must accept a known private Chat ID")
+require(r"私人 Chat ID \[知道请直接输入；不知道请直接回车使用一次性配对码\]", "interactive Telegram setup must accept a known private Chat ID")
 require(r'pairing_code="HY2-\$\(openssl rand -hex 8\)"', "unknown Chat IDs must use a random one-time pairing code")
 require(r'message\.get\("text"\) != pairing_code', "Telegram discovery must only accept the exact pairing code")
 require(r"一次性配对码对应多个私人聊天，拒绝自动绑定", "ambiguous pairing codes must fail closed")
 require(r"确认请输入 YES", "interactive setup must confirm that the test message reached the owner")
 require(r"是否现在开启 Telegram 成功连接提醒", "interactive installs must offer Telegram setup")
 require(r"flock -u 9\s+command_telegram_setup", "the install lock must be released before Telegram setup")
-require(r"hy2-safe.*一键管理菜单", "running without a command must offer a management menu")
+require(r"Hysteria 2 管理菜单", "running without a command must offer a management menu")
 require(r'\[\[ "\$#" -eq 0 \]\][\s\S]*?command_menu', "no-argument interactive runs must open the menu")
 require(r"完整卸载 Hy2", "the menu must expose a clearly labeled full uninstall")
 require(r"更换 Telegram 机器人", "the menu must expose Telegram bot replacement")
@@ -96,6 +96,20 @@ require(r"3\)[\s\S]*?command_telegram_add", "the add menu entry must not silentl
 require(r"telegram-replace\) command_telegram_replace", "Telegram replacement needs a direct command")
 require(r"立即检查更新（默认另有每周自动更新）", "manual update must be distinguished from automatic updates")
 require(r"查看版本、服务和自动更新状态", "the status menu must clearly advertise version output")
+require(r"initialize_colors", "interactive output must initialize colors centrally")
+require(r'-z "\$\{NO_COLOR\+x\}"', "NO_COLOR must disable ANSI styling")
+require(r'"\$\{TERM:-dumb\}" != "dumb"', "dumb terminals must not receive ANSI styling")
+require(r"\[\[ -t 1", "redirected output must not receive ANSI styling")
+require(r"menu_item", "menu options must use one consistent formatter")
+require(r"COLOR_YELLOW=\$'\\033\[33m'", "prompts and menu choices must use ANSI yellow")
+require(r"COLOR_CYAN=\$'\\033\[36m'", "menu headings must use ANSI cyan")
+require(r"COLOR_GREEN=\$'\\033\[32m'", "informational output must use ANSI green")
+require(r"COLOR_RED=\$'\\033\[31m'", "errors must use ANSI red")
+require(r"\[Y/n，直接回车默认：是\]", "yes-default prompts must explain Enter behavior")
+require(r"\[y/N，直接回车默认：否\]", "no-default prompts must explain Enter behavior")
+require(r"prompt_yes_no", "yes/no decisions must use one validated prompt helper")
+require(r"请输入 y（是）或 n（否）", "invalid yes/no input must be rejected visibly")
+forbid(r"read -r (?:-s )?-p", "interactive reads must use the centralized safe prompt helpers")
 require(r"refresh_managed_runtime", "downloaded manager updates must refresh hardened runtime files")
 require(r"管理脚本、服务账号权限和 systemd 单元已同步", "runtime refreshes must be visible to the user")
 require(r"当前 Hysteria 2 版本", "status output must show the installed Hysteria version first")
@@ -234,7 +248,7 @@ if README.count("```") % 2:
     raise AssertionError("README fenced code blocks must be balanced")
 if "[!IMPORTANT]" not in README or "[!WARNING]" not in README:
     raise AssertionError("README must make the main safety warnings prominent")
-if "hy2-safe v1.0.2 一键管理菜单" not in README:
+if "hy2-safe v1.0.3 · Hysteria 2 管理菜单" not in README:
     raise AssertionError("README menu version must match the release")
 if "/etc/hysteria/hy2-safe-account.env" not in README:
     raise AssertionError("README must explain the account ownership record")
@@ -242,6 +256,10 @@ if "密码状态必须是 `L`" not in README:
     raise AssertionError("README must explain the locked service-account password")
 if "## 隐私与敏感信息" not in README:
     raise AssertionError("README must explain what sensitive data leaves the VPS")
+if "NO_COLOR=1 hy2-safe" not in README:
+    raise AssertionError("README must explain how to disable interactive colors")
+if "直接回车默认：是" not in README or "直接回车默认：否" not in README:
+    raise AssertionError("README must explain yes/no defaults in plain language")
 combined_public_text = SCRIPT + "\n" + README
 for email in re.findall(
     r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}\b",
