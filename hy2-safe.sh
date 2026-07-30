@@ -3259,7 +3259,7 @@ command_telegram_setup() {
     die "Telegram 提醒启用失败，已恢复原配置。"
   fi
 
-  info "Telegram 提醒已启用，消息名称为“${TELEGRAM_NAME}”，只会向 Chat ID ${TELEGRAM_CHAT_ID} 主动发送消息。"
+  info "Telegram 提醒已启用，消息名称为【${TELEGRAM_NAME}】，只会向 Chat ID ${TELEGRAM_CHAT_ID} 主动发送消息。"
   printf '规则：新 IP 网段立即提醒；相同网段一小时内合并；北京时间每天 08:00 静默发送前一日日报，每月 1 日 08:05 静默发送上月月报。\n'
 }
 
@@ -3352,7 +3352,7 @@ command_telegram_name() {
     die "Telegram 消息名称修改失败，已恢复原名称。"
   fi
 
-  info "Telegram 消息名称已设置为“${TELEGRAM_NAME}”。"
+  info "Telegram 消息名称已设置为【${TELEGRAM_NAME}】。"
   if ! stored_telegram_send_test; then
     warn "名称已经保存，但 Telegram 测试消息发送失败；请运行 hy2-safe telegram-test 重试。"
   fi
