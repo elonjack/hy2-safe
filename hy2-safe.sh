@@ -15,7 +15,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.0.1"
+readonly PROGRAM_VERSION="1.0.2"
 readonly REPOSITORY="apernet/hysteria"
 readonly API_URL="https://api.github.com/repos/${REPOSITORY}/releases/latest"
 readonly RELEASE_URL="https://github.com/${REPOSITORY}/releases/download"
@@ -1557,7 +1557,7 @@ ProtectKernelLogs=true
 ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectProc=invisible
-ProcSubset=pid
+# journalctl needs /proc/sys/kernel/random/boot_id; ProcSubset=pid would hide it.
 ProtectSystem=strict
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictRealtime=true
@@ -1701,14 +1701,15 @@ refresh_managed_runtime() {
 discover_telegram_chats() {
   local token_file="$1"
   local candidates_file="$2"
-  python3 - "$token_file" "$candidates_file" <<'PY'
+  local pairing_code="$3"
+  python3 - "$token_file" "$candidates_file" "$pairing_code" <<'PY'
 import datetime as dt
 import json
 import sys
 import urllib.parse
 import urllib.request
 
-token_path, candidates_path = sys.argv[1:]
+token_path, candidates_path, pairing_code = sys.argv[1:]
 token = open(token_path, "r", encoding="utf-8").read().strip()
 
 
@@ -1749,6 +1750,8 @@ for update in updates:
     message = update.get("message")
     if not isinstance(message, dict):
         continue
+    if message.get("text") != pairing_code:
+        continue
     chat = message.get("chat")
     if not isinstance(chat, dict) or chat.get("type") != "private":
         continue
@@ -1775,9 +1778,15 @@ with open(candidates_path, "w", encoding="utf-8") as handle:
     json.dump(sorted(chats.values(), key=lambda item: item["id"]), handle)
 
 if not chats:
-    raise SystemExit("没有找到私人聊天。请先在 Telegram 中给该机器人发送一条消息，再重试。")
+    raise SystemExit(
+        "没有找到发送了本次一次性配对码的私人聊天。"
+        "请确认消息发给了正确机器人，并重新运行设置。"
+    )
 
-print("找到以下私人聊天，请只选择你自己的 Chat ID：")
+if len(chats) != 1:
+    raise SystemExit("一次性配对码对应多个私人聊天，拒绝自动绑定；请重新运行设置。")
+
+print("已通过一次性配对码找到私人聊天：")
 for item in sorted(chats.values(), key=lambda value: value["id"]):
     identity = item["name"] or "未显示姓名"
     if item["username"]:
@@ -1786,17 +1795,20 @@ for item in sorted(chats.values(), key=lambda value: value["id"]):
 PY
 }
 
-validate_discovered_chat() {
+read_discovered_chat_id() {
   local candidates_file="$1"
-  local chat_id="$2"
-  python3 - "$candidates_file" "$chat_id" <<'PY'
+  python3 - "$candidates_file" <<'PY'
 import json
 import sys
 
 with open(sys.argv[1], "r", encoding="utf-8") as handle:
     candidates = json.load(handle)
-if sys.argv[2] not in {str(item.get("id")) for item in candidates}:
+if len(candidates) != 1:
     raise SystemExit(1)
+chat_id = str(candidates[0].get("id", ""))
+if not chat_id.isdigit() or int(chat_id) <= 0:
+    raise SystemExit(1)
+print(chat_id)
 PY
 }
 
@@ -2233,7 +2245,7 @@ restore_telegram_change() {
 command_telegram_setup() {
   local token_input_file=""
   local requested_chat_id=""
-  local token_file candidates_file old_enabled
+  local token_file candidates_file old_enabled pairing_code confirmation
   require_root
   require_systemd
   install_dependencies
@@ -2277,7 +2289,7 @@ command_telegram_setup() {
   if [[ -n "$token_input_file" ]]; then
     head -n 1 -- "$token_input_file" | tr -d '\r\n' >"$token_file"
   else
-    printf '请先通过 Telegram 的 @BotFather 创建机器人，并给机器人发送一条消息。\n'
+    printf '请先通过 Telegram 的 @BotFather 创建机器人。\n'
     read -r -s -p "请输入 Bot Token（输入时不会显示）: " TELEGRAM_BOT_TOKEN
     printf '\n'
     printf '%s' "$TELEGRAM_BOT_TOKEN" >"$token_file"
@@ -2288,17 +2300,29 @@ command_telegram_setup() {
     die "Bot Token 格式无效。"
 
   if [[ -z "$requested_chat_id" ]]; then
-    read -r -p "确认已经给机器人发送消息后，按回车继续。"
-    discover_telegram_chats "$token_file" "$candidates_file"
-    read -r -p "请输入上面属于你自己的私人 Chat ID: " requested_chat_id
-    validate_telegram_chat_id "$requested_chat_id" ||
-      die "Chat ID 必须是私人聊天的正整数。"
-    validate_discovered_chat "$candidates_file" "$requested_chat_id" ||
-      die "该 Chat ID 不在刚才发现的私人聊天中，拒绝设置。"
+    read -r -p "如果知道自己的私人 Chat ID，请输入；不知道请直接回车: " requested_chat_id
+    if [[ -n "$requested_chat_id" ]]; then
+      validate_telegram_chat_id "$requested_chat_id" ||
+        die "Chat ID 必须是私人聊天的正整数。"
+    else
+      pairing_code="HY2-$(openssl rand -hex 8)"
+      printf '请在 Telegram 私聊机器人中发送下面这段一次性配对码：\n\n%s\n\n' "$pairing_code"
+      read -r -p "确认配对码已经成功发送后，按回车继续。"
+      discover_telegram_chats "$token_file" "$candidates_file" "$pairing_code"
+      requested_chat_id="$(read_discovered_chat_id "$candidates_file")" ||
+        die "无法安全确定唯一的私人 Chat ID。"
+      validate_telegram_chat_id "$requested_chat_id" ||
+        die "Telegram 返回了无效的私人 Chat ID。"
+    fi
   fi
 
   info "发送 Telegram 测试消息。"
   telegram_send_test "$token_file" "$requested_chat_id"
+  if [[ -t 0 && -z "$token_input_file" ]]; then
+    read -r -p "请确认自己的 Telegram 已收到测试消息；确认请输入 YES: " confirmation
+    [[ "$confirmation" == "YES" ]] ||
+      die "未确认收到测试消息，未保存 Telegram 配置。"
+  fi
 
   old_enabled="$TELEGRAM_ENABLED"
   cp --preserve=mode,ownership,timestamps -- "$CONFIG_PATH" "${TMP_ROOT}/config.yaml"

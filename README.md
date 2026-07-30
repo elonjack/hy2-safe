@@ -115,14 +115,17 @@ VPS 系统防火墙和云厂商安全组是两层不同的过滤：
 以 `root` 登录 VPS，复制下面一整行：
 
 ```bash
-curl -fL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh -o /root/hy2-safe.sh && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
+apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh -o /root/hy2-safe.sh && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
 ```
 
-这条命令会先保存脚本，再执行本地文件，不是直接把网络内容通过管道交给 Shell。
+这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，然后保存脚本并执行本地文件；不是直接把网络内容通过管道交给 Shell。
 
 如果想先查看：
 
 ```bash
+apt-get update
+apt-get install -y --no-install-recommends ca-certificates curl
+
 curl -fL --proto '=https' --tlsv1.2 \
   https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh \
   -o /root/hy2-safe.sh
@@ -171,7 +174,7 @@ hy2-safe
 菜单如下：
 
 ```text
-hy2-safe v1.0.1 一键管理菜单
+hy2-safe v1.0.2 一键管理菜单
 
   1) 安装 Hy2
   2) 完整卸载 Hy2
@@ -344,11 +347,12 @@ Telegram 功能默认关闭。它只监听 Hysteria 的“认证成功连接”�
 
 1. 在 Telegram 中找到官方 `@BotFather`。
 2. 发送 `/newbot` 创建一个专用机器人。
-3. 打开新机器人，给它发送任意私人消息。
-4. 运行 `hy2-safe`，选择 `3) 添加 Telegram 通知`。
-5. 输入 Bot Token。输入时终端不会显示字符。
-6. 选择属于自己的私人 Chat ID。
-7. 收到测试消息后配置才会生效。
+3. 运行 `hy2-safe`，选择 `3) 添加 Telegram 通知`。
+4. 输入 Bot Token。输入时终端不会显示字符。
+5. 如果知道自己的私人 Chat ID，可以直接输入；不知道就直接回车。
+6. 不知道 Chat ID 时，脚本会生成一段随机的一次性配对码；把它原样发送给机器人，再回终端按回车。
+7. 脚本只接受发送了本次配对码的唯一私人聊天，不会把先联系机器人的陌生人自动绑定为接收者。
+8. 脚本发送测试消息后，确认自己的 Telegram 确实收到，再在终端输入大写 `YES`；未确认时不会保存配置。
 
 建议创建专门用于 Hy2 的机器人，不要复用正在使用 webhook 或处理其他命令的机器人。
 
@@ -389,6 +393,8 @@ hy2-safe telegram-disable
 - systemd 通过凭据目录把 Token 交给隔离的动态用户。
 - Hysteria 流量统计 API 只监听 `127.0.0.1`，并使用随机密钥。
 - 提醒只发送给配置时确认的固定私人 Chat ID。
+- 不知道 Chat ID 时使用 64 bit 随机一次性配对码，并要求唯一匹配。
+- 交互设置必须人工确认收到测试消息，避免输错 Chat ID 后把提醒发给别人。
 - 机器人不会在后台轮询陌生人的命令。
 
 如果 Token 泄露，请先在 `@BotFather` 撤销，然后使用“更换 Telegram 机器人”。
