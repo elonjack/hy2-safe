@@ -15,7 +15,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.0.8"
+readonly PROGRAM_VERSION="1.0.9"
 readonly REPOSITORY="apernet/hysteria"
 readonly API_URL="https://api.github.com/repos/${REPOSITORY}/releases/latest"
 readonly RELEASE_URL="https://github.com/${REPOSITORY}/releases/download"
@@ -32,6 +32,7 @@ readonly SERVICE_PATH="/etc/systemd/system/hysteria-server.service"
 readonly UPDATE_SERVICE_PATH="/etc/systemd/system/hy2-safe-update.service"
 readonly UPDATE_TIMER_PATH="/etc/systemd/system/hy2-safe-update.timer"
 readonly HEALTH_SERVICE_PATH="/etc/systemd/system/hy2-safe-health.service"
+readonly HEALTH_ALERT_SERVICE_PATH="/etc/systemd/system/hy2-safe-health-alert.service"
 readonly HEALTH_TIMER_PATH="/etc/systemd/system/hy2-safe-health.timer"
 readonly NOTIFIER_PATH="/usr/local/libexec/hy2-safe-notifier.py"
 readonly NOTIFIER_CONFIG_PATH="${CONFIG_DIR}/telegram-notifier.json"
@@ -2845,12 +2846,46 @@ EOF
   cat >"$HEALTH_SERVICE_PATH" <<EOF
 [Unit]
 Description=Check the Hysteria 2 ACME certificate
+OnFailure=hy2-safe-health-alert.service
+
+[Service]
+Type=oneshot
+ExecStart=${MANAGER_PATH} certificate-check --quiet --systemd-probe
+UMask=0077
+NoNewPrivileges=true
+# CertMagic intentionally stores ACME directories as 0700 and certificates as
+# 0600 under the unprivileged hysteria account. The checker runs as root but
+# needs this read-only capability after systemd drops every other capability.
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_DAC_READ_SEARCH
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+EOF
+
+  cat >"$HEALTH_ALERT_SERVICE_PATH" <<EOF
+[Unit]
+Description=Send a Telegram alert for a failed Hy2 certificate check
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=${MANAGER_PATH} certificate-check --quiet
+ExecStart=${MANAGER_PATH} certificate-alert --quiet
 UMask=0077
 NoNewPrivileges=true
 CapabilityBoundingSet=
@@ -2893,6 +2928,7 @@ EOF
     "$UPDATE_SERVICE_PATH" \
     "$UPDATE_TIMER_PATH" \
     "$HEALTH_SERVICE_PATH" \
+    "$HEALTH_ALERT_SERVICE_PATH" \
     "$HEALTH_TIMER_PATH"
   systemctl daemon-reload
 }
@@ -3234,8 +3270,10 @@ messages = {
     ),
     "certificate-warning": (
         "<b>⚠️ Hy2 证书需要检查</b>",
-        "没有找到与节点域名匹配且有效期超过 21 天的证书。\n"
-        "请检查域名解析、ACME 端口和 <code>journalctl -u hysteria-server.service</code>。",
+        html.escape(detail) if detail else (
+            "没有找到与节点域名匹配且有效期超过 21 天的证书。\n"
+            "请检查 Hysteria 服务日志。"
+        ),
         False,
     ),
 }
@@ -3270,8 +3308,37 @@ if not result.get("ok"):
 PY
 }
 
+certificate_matches_domain() {
+  local certificate="$1"
+  local domain="$2"
+  openssl x509 -in "$certificate" -noout -checkhost "$domain" >/dev/null 2>&1
+}
+
+certificate_valid_beyond() {
+  local certificate="$1"
+  local seconds="$2"
+  openssl x509 -in "$certificate" -noout -checkend "$seconds" >/dev/null 2>&1
+}
+
+certificate_acme_hint() {
+  case "${ACME_TYPE:-http}" in
+    http)
+      printf '当前使用 HTTP-01；请检查域名灰云解析、入站 TCP 80 和 Hysteria 日志。'
+      ;;
+    tls)
+      printf '当前使用 TLS-ALPN-01；请检查域名灰云解析、入站 TCP 443 和 Hysteria 日志。'
+      ;;
+    dns)
+      printf '当前使用 Cloudflare DNS-01，不需要入站 TCP 80/443；请检查 Token、Zone 权限和 Hysteria 日志。'
+      ;;
+    *)
+      printf '请检查域名解析和 Hysteria 日志。'
+      ;;
+  esac
+}
+
 command_certificate_check() {
-  local certificate quiet=0 matching=0 healthy=0
+  local certificate quiet=0 systemd_probe=0 matching=0 healthy=0 warning_detail acme_hint
   local -a certificates=()
   require_root
   load_existing_settings || die "请先安装 Hy2。"
@@ -3280,6 +3347,10 @@ command_certificate_check() {
       --quiet)
         quiet=1
         QUIET=1
+        shift
+        ;;
+      --systemd-probe)
+        systemd_probe=1
         shift
         ;;
       -h | --help)
@@ -3296,9 +3367,9 @@ command_certificate_check() {
     )
   fi
   for certificate in "${certificates[@]}"; do
-    if openssl x509 -in "$certificate" -noout -checkhost "$DOMAIN" >/dev/null 2>&1; then
+    if certificate_matches_domain "$certificate" "$DOMAIN"; then
       matching=1
-      if openssl x509 -in "$certificate" -noout -checkend 1814400 >/dev/null 2>&1; then
+      if certificate_valid_beyond "$certificate" 1814400; then
         healthy=1
         break
       fi
@@ -3311,10 +3382,40 @@ command_certificate_check() {
   fi
   if [[ "$matching" -eq 1 ]]; then
     warn "与 ${DOMAIN} 匹配的证书将在 21 天内到期或已经到期。"
+    warning_detail="已找到与 ${DOMAIN} 匹配的证书，但它将在 21 天内到期或已经到期。"
   else
     warn "没有找到与 ${DOMAIN} 匹配的 ACME 证书。"
+    warning_detail="没有在本机 ACME 缓存中找到与 ${DOMAIN} 匹配的证书。"
   fi
-  send_telegram_system_event certificate-warning || true
+  acme_hint="$(certificate_acme_hint)"
+  warning_detail+=$'\n'
+  warning_detail+="${acme_hint}"
+  if [[ "$systemd_probe" -eq 1 ]]; then
+    return 1
+  fi
+  send_telegram_system_event certificate-warning "$warning_detail" || true
+}
+
+command_certificate_alert() {
+  local quiet=0 warning_detail acme_hint
+  require_root
+  load_existing_settings || die "请先安装 Hy2。"
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --quiet)
+        quiet=1
+        QUIET=1
+        shift
+        ;;
+      *) die "certificate-alert 的未知选项：$1" ;;
+    esac
+  done
+  acme_hint="$(certificate_acme_hint)"
+  warning_detail="本机证书健康检查未通过。"
+  warning_detail+=$'\n'
+  warning_detail+="${acme_hint}"
+  send_telegram_system_event certificate-warning "$warning_detail" || true
+  [[ "$quiet" -eq 1 ]] || warn "$warning_detail"
 }
 
 configure_notifier_service() {
@@ -4183,6 +4284,7 @@ command_uninstall() {
   systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
   systemctl disable --now "$TIMER_NAME" >/dev/null 2>&1 || true
   systemctl disable --now "$HEALTH_TIMER_NAME" >/dev/null 2>&1 || true
+  systemctl stop hy2-safe-health-alert.service >/dev/null 2>&1 || true
   systemctl disable --now "$NOTIFIER_NAME" >/dev/null 2>&1 || true
   systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null &&
     die "Hysteria 服务仍在运行，拒绝继续卸载。"
@@ -4209,6 +4311,7 @@ command_uninstall() {
     "$UPDATE_SERVICE_PATH" \
     "$UPDATE_TIMER_PATH" \
     "$HEALTH_SERVICE_PATH" \
+    "$HEALTH_ALERT_SERVICE_PATH" \
     "$HEALTH_TIMER_PATH" \
     "$NOTIFIER_SERVICE_PATH" \
     "$BIN_PATH" \
@@ -4232,6 +4335,7 @@ command_uninstall() {
     "$SERVICE_NAME" \
     hy2-safe-update.service \
     hy2-safe-health.service \
+    hy2-safe-health-alert.service \
     "$NOTIFIER_NAME" >/dev/null 2>&1 || true
 
   info "Hy2 程序、配置、证书、密码、Cloudflare/Telegram Token 和通知状态已完整删除。"
@@ -4344,6 +4448,7 @@ main() {
     update) command_update "$@" ;;
     rotate-password) command_rotate_password "$@" ;;
     certificate-check) command_certificate_check "$@" ;;
+    certificate-alert) command_certificate_alert "$@" ;;
     show-client) show_client "$@" ;;
     status) command_status "$@" ;;
     version | -V | --version) command_version ;;

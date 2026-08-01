@@ -21,7 +21,7 @@ def forbid(pattern: str, message: str) -> None:
 
 
 require(r"^set -Eeuo pipefail$", "strict Bash mode is required")
-require(r'PROGRAM_VERSION="1\.0\.8"', "the release must expose its manager version")
+require(r'PROGRAM_VERSION="1\.0\.9"', "the release must expose its manager version")
 require(r"require_supported_os", "installations must be limited to Debian 12/13")
 require(r"sha256sum", "release binaries must be checksum-verified")
 require(r"release_asset_field", "release metadata must be parsed structurally")
@@ -152,6 +152,13 @@ require(r"preflight_ports", "install and configure must preflight TCP/UDP confli
 require(r"ss -H -lnt", "ACME TCP conflicts must be detected before changes")
 require(r"ss -H -lun", "Hy2 UDP conflicts must be detected before changes")
 require(r"OnCalendar=\*-\*-\* 09:00", "certificate health must be checked daily")
+require(r"CapabilityBoundingSet=CAP_DAC_READ_SEARCH", "certificate checks must be able to traverse CertMagic's private cache")
+require(r"AmbientCapabilities=CAP_DAC_READ_SEARCH", "certificate read capability must reach find and OpenSSL")
+require(r"OnFailure=hy2-safe-health-alert\.service", "certificate warnings must be delegated to a capability-free alert unit")
+require(r"ExecStart=\$\{MANAGER_PATH\} certificate-check --quiet --systemd-probe", "the capability-bearing checker must not send network alerts")
+require(r"ExecStart=\$\{MANAGER_PATH\} certificate-alert --quiet", "certificate alerts need a separate hardened unit")
+require(r"certificate_matches_domain", "certificate hostname matching must be directly testable")
+require(r"certificate_valid_beyond", "certificate expiry checking must be directly testable")
 require(r"certificate-warning", "certificate expiry failures must support Telegram alerts")
 require(r"update-failed", "failed Hysteria updates must support Telegram alerts")
 require(r"update-success", "successful version changes must support Telegram alerts")
@@ -543,7 +550,7 @@ if README.count("```") % 2:
     raise AssertionError("README fenced code blocks must be balanced")
 if "[!IMPORTANT]" not in README or "[!WARNING]" not in README:
     raise AssertionError("README must make the main safety warnings prominent")
-if "hy2-safe v1.0.8 · Hysteria 2 管理菜单" not in README:
+if "hy2-safe v1.0.9 · Hysteria 2 管理菜单" not in README:
     raise AssertionError("README menu version must match the release")
 if "/etc/hysteria/hy2-safe-account.env" not in README:
     raise AssertionError("README must explain the account ownership record")

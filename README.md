@@ -124,10 +124,10 @@ VPS 系统防火墙和云厂商安全组是两层不同的过滤：
 以 `root` 登录 VPS，复制下面一整行：
 
 ```bash
-apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.0.8/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.0.8/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
+apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.0.9/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.0.9/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
 ```
 
-这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.0.8` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
+这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.0.9` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
 
 如果想先查看：
 
@@ -186,7 +186,7 @@ hy2-safe
 菜单如下：
 
 ```text
-hy2-safe v1.0.8 · Hysteria 2 管理菜单
+hy2-safe v1.0.9 · Hysteria 2 管理菜单
 
   1) 安装 Hy2
   2) 完整卸载 Hy2
@@ -614,7 +614,11 @@ hy2-safe-update.timer
 hy2-safe-health.timer
 ```
 
-它每天检查 ACME 目录中是否存在与当前域名匹配、有效期超过 21 天的证书。健康时保持安静；缺失、域名不匹配或临近到期时写入日志，并在 Telegram 已启用时告警。手工检查：
+它每天检查 ACME 目录中是否存在与当前域名匹配、有效期超过 21 天的证书。健康时保持安静；缺失、域名不匹配或临近到期时写入日志，并在 Telegram 已启用时告警。检查服务只获得读取 CertMagic 私有证书目录所需的 `CAP_DAC_READ_SEARCH`，不获得写文件或联网权限；检查失败后由另一个没有任何 Linux capabilities 的隔离服务发送 Telegram。
+
+`v1.0.8` 的健康检查单元把全部 capabilities 清空，但 CertMagic 会把证书缓存目录创建为仅 `hysteria` 账号可进入的 `0700`。因此定时检查可能看不到实际存在的证书并误报告警；这不等于客户端正在使用的证书失效。`v1.0.9` 已修正该只读权限，并根据 HTTP-01、TLS-ALPN-01 或 Cloudflare DNS-01 显示对应排错提示。
+
+手工检查：
 
 ```bash
 hy2-safe certificate-check
@@ -765,6 +769,7 @@ hy2-safe
 | `/etc/systemd/system/hysteria-server.service` | Hy2 服务 |
 | `/etc/systemd/system/hy2-safe-update.timer` | 每周自动更新 |
 | `/etc/systemd/system/hy2-safe-health.timer` | 每日证书健康检查 |
+| `/etc/systemd/system/hy2-safe-health-alert.service` | 无 capabilities 的证书 Telegram 告警服务 |
 | `/etc/systemd/system/hy2-safe-notifier.service` | Telegram 提醒服务 |
 
 ## 常用命令
@@ -971,6 +976,6 @@ hy2-safe rotate-password
 
 ## 版本
 
-当前管理脚本正式版本：`v1.0.8`
+当前管理脚本正式版本：`v1.0.9`
 
 Release 页面：[elonjack/hy2-safe/releases](https://github.com/elonjack/hy2-safe/releases)

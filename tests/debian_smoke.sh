@@ -7,7 +7,7 @@ export HY2_SAFE_SOURCE_ONLY=1
 # shellcheck source=../hy2-safe.sh
 source "${TEST_ROOT}/hy2-safe.sh"
 
-[[ "$PROGRAM_VERSION" == "1.0.8" ]]
+[[ "$PROGRAM_VERSION" == "1.0.9" ]]
 validate_domain "hy2.example.com"
 ! validate_domain "invalid_domain"
 validate_email "owner@example.com"
@@ -29,5 +29,17 @@ validate_password "0123456789abcdef"
 generated_password="$(random_password)"
 validate_password "$generated_password"
 [[ "${#generated_password}" -ge 40 ]]
+
+certificate_test_dir="$(mktemp -d)"
+trap 'rm -rf -- "$certificate_test_dir"' EXIT
+openssl req -x509 -newkey rsa:2048 -nodes -days 30 \
+  -subj '/CN=hy2.example.com' \
+  -addext 'subjectAltName=DNS:hy2.example.com' \
+  -keyout "${certificate_test_dir}/test.key" \
+  -out "${certificate_test_dir}/test.crt" >/dev/null 2>&1
+certificate_matches_domain "${certificate_test_dir}/test.crt" "hy2.example.com"
+! certificate_matches_domain "${certificate_test_dir}/test.crt" "wrong.example.com"
+certificate_valid_beyond "${certificate_test_dir}/test.crt" 1814400
+! certificate_valid_beyond "${certificate_test_dir}/test.crt" 2678400
 
 printf 'Debian helper smoke checks passed\n'
