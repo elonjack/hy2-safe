@@ -20,9 +20,11 @@
 - [一行命令开始使用](#一行命令开始使用)
 - [安装时怎么填写](#安装时怎么填写)
 - [管理菜单](#管理菜单)
+- [服务控制与诊断](#服务控制与诊断)
 - [客户端怎么连接](#客户端怎么连接)
 - [上传下载速度和 QoS](#上传下载速度和-qos)
 - [端口跳跃](#端口跳跃)
+- [Mimic（Fake TCP）](#mimicfake-tcp)
 - [域名、证书和双栈](#域名证书和双栈)
 - [伪装页面](#伪装页面)
 - [Telegram 连接与流量提醒](#telegram-连接与流量提醒)
@@ -45,7 +47,9 @@
 - 默认使用简单的 HTTP-01；可选 Cloudflare DNS-01，完全释放入站 TCP 80/443。
 - 客户端保持官方默认的证书验证，分享链接明确输出 `insecure=0`。
 - 安装和修改前自动核对域名解析、本机公网地址、所选 ACME TCP 端口及 Hy2 UDP 端口冲突。
+- 检测到 `vps-security-bootstrap` 的受管 nftables 防火墙时，会在写配置或重启前核对 ACME TCP 端口和完整 Hy2 UDP 范围；不会自行改写防火墙规则。
 - 默认开启原生 UDP 端口跳跃：`50000-50500`（共 501 个端口）。
+- 可显式启用 Hysteria 2 v2.12.0 的 Mimic（Fake TCP）；启用前检查核心版本、Mimic 命令和不兼容的端口跳跃配置。
 - 不硬编码客户端上传/下载 Mbps，使用较保守的自适应 BBR。
 - Hysteria 使用独立无登录权限账号运行；每次服务启动前都会检查密码锁定、登录 Shell 和 SSH 密钥入口。
 - 默认使用本机固定小页面作为伪装，不反向代理 Bing 等第三方大站。
@@ -73,6 +77,8 @@
 2. 保留当前 SSH 窗口。
 3. 新开一个 SSH 窗口，确认密钥登录正常。
 4. 再安装 `hy2-safe`。
+
+之后在 `vps-security-bootstrap` 的防火墙菜单中，选择“追加额外 TCP 放行端口”加入 `80`，再选择“追加额外 UDP 放行端口”加入 `50000-50500`。这两个值随 Hy2 的 ACME 类型或端口跳跃设置变化；云厂商安全组也要同步放行。
 
 ## Cloudflare DNS 设置
 
@@ -115,6 +121,8 @@ VPS 系统防火墙和云厂商安全组是两层不同的过滤：
 
 `hy2-safe` 不会清空、开启或重写你的系统防火墙，也无法修改云厂商控制台。Hysteria 为端口跳跃创建的临时重定向规则不等于默认拒绝防火墙中的“允许入站”规则。
 
+如果检测到由 [vps-security-bootstrap](https://github.com/elonjack/vps-security-bootstrap) 已加载的受管 nftables 表，`hy2-safe` 会只读检查它记录的额外 TCP/UDP 端口。缺少 HTTP-01 所需的 TCP `80`、TLS-ALPN-01 所需的 TCP `443`，或缺少完整的 Hy2 UDP 单端口/跳跃范围时，脚本会在写配置和重启前停止，并告诉你在该脚本的“追加额外端口”菜单中补哪个值。它不会替你修改防火墙，也不能验证云安全组；这样不会意外覆盖你已有的 SSH 或其他服务规则。
+
 默认配置明确使用 ACME `http` 验证，因此只需要 TCP `80`，不占 TCP `443`。申请和续期时 Hysteria 会临时监听所选验证端口；平时 Hy2 数据仍走 UDP，但 TCP `80` 必须保持可用，不能同时由 Nginx、Caddy、Apache 等程序长期监听。
 
 如果同一台 VPS 还要运行网站，可以在安装或修改时选择 Cloudflare DNS-01。它通过 Cloudflare API 创建临时 TXT 记录验证域名，不需要任何入站 TCP 80/443；网站可以完整使用这两个端口。DNS-01 只改变证书验证方式，Hy2 的 `A`/`AAAA` 记录仍必须是灰云。
@@ -124,10 +132,10 @@ VPS 系统防火墙和云厂商安全组是两层不同的过滤：
 以 `root` 登录 VPS，复制下面一整行：
 
 ```bash
-apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.0.9/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.0.9/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
+apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.0/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.0/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
 ```
 
-这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.0.9` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
+这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.1.0` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
 
 如果想先查看：
 
@@ -186,7 +194,7 @@ hy2-safe
 菜单如下：
 
 ```text
-hy2-safe v1.0.9 · Hysteria 2 管理菜单
+hy2-safe v1.1.0 · Hysteria 2 管理菜单
 
   1) 安装 Hy2
   2) 完整卸载 Hy2
@@ -200,6 +208,9 @@ hy2-safe v1.0.9 · Hysteria 2 管理菜单
   10) 立即发送 Telegram 流量报告
   11) 设置 Telegram 消息名称
   12) 一键重置 Hy2 密码
+  13) 服务控制与诊断
+  14) 设置 Telegram 重连提醒频率
+  15) 设置 Telegram 通知偏好
   0) 退出
 ```
 
@@ -219,6 +230,21 @@ NO_COLOR=1 hy2-safe
 ```
 
 大写字母表示默认选择，但不需要自己猜：按照冒号前的中文说明直接回车即可。
+
+## 服务控制与诊断
+
+菜单 `13) 服务控制与诊断` 提供查看状态、启动、停止、停止后重新启动，以及最近 120 条 Hy2 日志。命令行也可使用：
+
+```bash
+hy2-safe service status
+hy2-safe service start
+hy2-safe service stop
+hy2-safe service restart
+```
+
+`restart` 会先停止服务、清除旧的 systemd 失败状态，再只启动一次；适用于修好 DNS、防火墙或安全组后的恢复。停止或重启会断开当前客户端连接。
+
+Hysteria 因 ACME 证书申请失败时，脚本会停止服务并清除失败重试状态，避免 systemd 反复申请证书；不会把“端口未放行”误报为 Telegram 配置错误。遇到 Let’s Encrypt `HTTP 429` 时，请以日志中的 `retry after` 为准，先修好端口和 DNS，等到该时间后再运行一次 `hy2-safe service start`。服务单元本身也限制为一小时最多三次失败重启、每次间隔 30 秒，避免独立启动时形成快速重试。
 
 ## 客户端怎么连接
 
@@ -327,6 +353,39 @@ hy2-safe configure --port 443 --non-interactive
 ```
 
 修改后记得同步调整所有启用默认拒绝的防火墙层。
+
+## Mimic（Fake TCP）
+
+Hysteria 2 v2.12.0 新增的 Mimic 不是把 Hy2 改成 TCP 代理。它仍使用 QUIC/UDP，只在 Linux 网络接口的收发路径用 eBPF 把数据包外观伪装为 TCP，供会限制 UDP 的网络排查使用。
+
+> [!WARNING]
+> 这是一次会中断现有客户端的变更。服务端和**每一个客户端**都必须是 Linux、安装 `mimic`、并在 Hysteria 配置中启用它；Windows、Android、iOS、macOS 或未配置 Mimic 的客户端都会无响应。Mimic 也不能与原生端口跳跃共用。
+
+此外，Hysteria 官方要求启用 Mimic 时以 `root` 运行，才能附加 eBPF 程序。`hy2-safe` 因此保持默认关闭；普通 Hy2 安装仍使用受限的 `hysteria` 账号。只有你明确添加 `--mimic` 时服务单元才会切换到 root。
+
+启用前，确认两端为 Linux 且内核不低于 Mimic 要求的 6.1；在服务器与客户端分别从 [Mimic 官方 Release](https://github.com/hack3ric/mimic/releases) 安装与发行版、CPU 架构匹配的 `mimic` 和 `mimic-dkms` 软件包。脚本会拒绝在未找到 `mimic`、Hysteria 低于 v2.12.0 或使用端口跳跃时启用。
+
+服务器先升级 Hysteria，再切到单 UDP 端口和 Mimic：
+
+```bash
+hy2-safe update
+hy2-safe configure --port 443 --mimic --non-interactive
+```
+
+之后运行 `hy2-safe show-client`，复制完整 YAML 到每个 Linux 客户端；分享链接不能携带 Mimic 设置。客户端配置必须包含：
+
+```yaml
+mimic:
+  enabled: true
+```
+
+Mimic 的收发路径对防火墙看到的协议并不完全相同，因此按 Mimic 官方建议，VPS 本机防火墙和云安全组都应同时允许所选端口的 TCP 与 UDP。
+
+验证时先保留一个不改动的 SSH 会话。服务器执行 `hy2-safe status` 和 `journalctl -u hysteria-server.service -e`，客户端确认 `mimic --version` 后再连接。若需要回退，在服务器运行：
+
+```bash
+hy2-safe configure --no-mimic --port 443 --non-interactive
+```
 
 ## 域名、证书和双栈
 
@@ -482,13 +541,11 @@ Telegram 功能默认关闭。启用后，同一个 Bot 和同一个隔离服务
 
 建议创建专门用于 Hy2 的机器人，不要复用正在使用 webhook 或处理其他命令的机器人。
 
-### 消息如何防刷屏
+### 默认通知与隐私
 
-- 新的 IPv4 `/24` 或 IPv6 `/48` 来源：立即提醒。
-- 同一网段短时间频繁重连：一小时合并一次。
-- 超过 24 小时没有出现后再次连接：重新提醒。
-- 北京时间每天 `08:00` 静默发送前一日 `00:00:00-23:59:59` 的完整日报。
-- 每月 1 日 `08:05` 静默发送上一个自然月的月报。
+- 默认开启：新的 IPv4 `/24` 或 IPv6 `/48` 来源提醒、超过 24 小时再次出现的来源提醒，以及证书到期/续期失败告警。
+- 默认关闭：同网段重连汇总、每日日报和每月月报。它们适合排错或长期观察，但对多数个人节点不是必需提醒。
+- 手动报告和测试消息只在你主动运行相应命令时发送。
 - IPv4 显示为 `123.45.67.*`。
 - IPv6 只显示前 48 bit，例如 `2408:8215:1234:*`。
 
@@ -505,6 +562,32 @@ hy2-safe telegram-name "洛杉矶-01"
 ```
 
 名称允许中文、英文、数字和常见符号，最多 64 个字符。不要把密码、Token、完整 IP 等敏感信息写进名称，因为名称会发送给 Telegram。
+
+### 重连提醒频率
+
+只有启用“重连汇总”后，这个频率才会生效。首次重连会马上发送 `Hy2 客户端重连`，窗口内的后续重连会在所选窗口结束后合并成 `Hy2 重连汇总`；因此消息里的“最近”是事件发生时间，Telegram 右下角才是实际发送时间。
+
+在菜单选择 `14) 设置 Telegram 重连提醒频率`，或运行：
+
+```bash
+hy2-safe telegram-reconnect-interval 10m
+```
+
+可选值为 `immediate`（每次都发）、`5m`、`10m`（默认）、`30m`、`1h`。端口跳跃或网络抖动频繁时不建议使用 `immediate`，否则可能产生大量消息。
+
+### 分别设置通知类型
+
+选择菜单 `15) 设置 Telegram 通知偏好`，或使用命令：
+
+```bash
+# 开启重连汇总和月报；保留日报关闭
+hy2-safe telegram-preferences --reconnect on --monthly on --daily off
+
+# 关闭新网段提醒（不影响证书告警）
+hy2-safe telegram-preferences --connection off
+```
+
+可独立设置 `--connection`（新网段及 24 小时后再次出现）、`--reconnect`、`--daily`、`--monthly`。每项使用 `on` 或 `off`。证书告警始终保留，不能被这个菜单关闭；这是避免证书失效导致节点不可用的关键提醒。
 
 ### 流量报告统计什么
 
@@ -634,16 +717,19 @@ hy2-safe certificate-check
 | 名称 | 用途 |
 | --- | --- |
 | `root` | 你通过 SSH 管理 VPS 使用的管理员账号 |
-| Linux 用户 `hysteria` | 只负责以低权限运行 Hysteria 服务端程序 |
+| Linux 用户 `hysteria` | 默认负责以低权限运行 Hysteria 服务端程序 |
+| `root`（仅启用 Mimic） | Mimic 附加 eBPF 程序时的上游必需权限 |
 | Hy2 随机密码 | v2rayN、v2rayNG 或官方客户端连接节点时使用 |
 
-让服务使用独立低权限账号，是为了即使 Hysteria 程序将来出现漏洞，也尽量缩小它能读写的系统范围。脚本会进行这些限制：
+默认让服务使用独立低权限账号，是为了即使 Hysteria 程序将来出现漏洞，也尽量缩小它能读写的系统范围。脚本会进行这些限制：
 
 - 登录 Shell 是 `/usr/sbin/nologin`、`/sbin/nologin` 或 `/bin/false`。
 - 创建账号后立即锁定密码，密码状态必须是 `L`。
 - 家目录 `/var/lib/hysteria` 由 `root` 控制，`hysteria` 用户不能在里面自行创建 `.ssh/authorized_keys`。
 - 只有证书目录 `/var/lib/hysteria/acme` 允许 `hysteria` 写入。
 - 每次 systemd 启动 Hy2 前，都会重新检查账号、组、密码锁定状态、`.ssh` 入口和目录权限；检查失败就不启动服务。
+
+只有显式启用 Mimic 时，服务单元会改为以 `root` 启动，并放宽内核模块保护；这是 Mimic 的 eBPF 工作方式要求的权限，不能与上述低权限隔离同时成立。关闭 Mimic 时脚本会恢复 ACME 状态目录的 `hysteria:hysteria` 所有权。
 
 因此，创建这个账号不会给 Telegram 发送“客户端连接”消息。Telegram 只提醒通过 Hy2 密码认证成功的网络客户端，不会把 Linux 本地账号创建当成节点连接。
 
@@ -817,6 +903,12 @@ hy2-safe telegram-report
 # 设置本机在 Telegram 消息中的名称
 hy2-safe telegram-name "洛杉矶-01"
 
+# 设置重连提醒：首次即时，后续 10 分钟汇总
+hy2-safe telegram-reconnect-interval 10m
+
+# 分别开启重连汇总和月报
+hy2-safe telegram-preferences --reconnect on --monthly on
+
 # 查看 Telegram 提醒日志
 hy2-safe telegram-logs
 
@@ -976,6 +1068,6 @@ hy2-safe rotate-password
 
 ## 版本
 
-当前管理脚本正式版本：`v1.0.9`
+当前正式版本：`v1.1.0`
 
 Release 页面：[elonjack/hy2-safe/releases](https://github.com/elonjack/hy2-safe/releases)

@@ -15,7 +15,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.0.9"
+readonly PROGRAM_VERSION="1.1.0"
 readonly REPOSITORY="apernet/hysteria"
 readonly API_URL="https://api.github.com/repos/${REPOSITORY}/releases/latest"
 readonly RELEASE_URL="https://github.com/${REPOSITORY}/releases/download"
@@ -44,6 +44,12 @@ readonly TIMER_NAME="hy2-safe-update.timer"
 readonly HEALTH_TIMER_NAME="hy2-safe-health.timer"
 readonly NOTIFIER_NAME="hy2-safe-notifier.service"
 readonly LOCK_PATH="/run/lock/hy2-safe.lock"
+# Read-only integration points written by elonjack/vps-security-bootstrap.
+# hy2-safe deliberately never writes these files or its nftables table.
+readonly VPS_SECURITY_CONF_DIR="/etc/vps-security"
+readonly VPS_SECURITY_TCP_PORTS_PATH="${VPS_SECURITY_CONF_DIR}/firewall-tcp-ports"
+readonly VPS_SECURITY_UDP_PORTS_PATH="${VPS_SECURITY_CONF_DIR}/firewall-udp-ports"
+readonly VPS_SECURITY_NFT_TABLE="vps_security_bootstrap"
 
 QUIET=0
 TMP_ROOT=""
@@ -167,12 +173,15 @@ usage() {
   hy2-safe certificate-check [--quiet]
   hy2-safe show-client
   hy2-safe status
+  hy2-safe service [start|stop|restart|status]
   hy2-safe version
   hy2-safe logs
   hy2-safe telegram-setup [--token-file FILE --chat-id ID --name NAME]
   hy2-safe telegram-test
   hy2-safe telegram-report
   hy2-safe telegram-name [NAME]
+  hy2-safe telegram-reconnect-interval [immediate|5m|10m|30m|1h]
+  hy2-safe telegram-preferences [--connection on|off] [--reconnect on|off] [--daily on|off] [--monthly on|off]
   hy2-safe telegram-logs
   hy2-safe telegram-disable
   hy2-safe telegram-replace [--token-file FILE --chat-id ID --name NAME]
@@ -186,6 +195,8 @@ install/configure 选项：
                              从 root-only 文件读取 Cloudflare API Token
   --port PORT                使用单 UDP 端口（关闭端口跳跃）
   --port-hopping START-END   使用原生端口跳跃范围，默认 50000-50500
+  --mimic                    启用 Mimic（Fake TCP；仅 Linux，服务端将以 root 运行）
+  --no-mimic                 关闭 Mimic（默认）
   --hop-min SECONDS          随机跳跃最短间隔，默认 15 秒
   --hop-max SECONDS          随机跳跃最长间隔，默认 45 秒
   --password-file FILE       从仅管理员可读的文件读取密码；默认安全随机生成
@@ -207,6 +218,8 @@ install/configure 选项：
   - 当前版本只支持 Debian 12/13。
   - 不会清空现有防火墙链，也不会修改 UFW、firewalld 或云安全组。
   - 端口跳跃会让 Hysteria 原生创建并在停止时清理自己的 nftables/iptables 临时规则。
+  - Mimic 需要服务器和每个客户端都是 Linux、安装 mimic，并使用 Hysteria 2 v2.12.0 或更高版本；
+    启用后不能与端口跳跃共用，未启用 Mimic 的客户端将无法连接。
   - 默认 ACME HTTP-01 只需要 TCP 80；tls 只需要 TCP 443；dns 不需要入站 TCP 端口。
   - Cloudflare Token 不接受命令行明文，只能隐藏输入或从 root-only 文件读取。
   - Telegram 提醒默认关闭；启用后只向设置时确认的私人 Chat ID 发消息。
@@ -503,6 +516,28 @@ wait_for_service() {
   return 0
 }
 
+service_log_cursor() {
+  journalctl --no-pager -n 1 --show-cursor -u "$SERVICE_NAME" 2>/dev/null |
+    sed -n 's/^-- cursor: //p' | tail -n 1
+}
+
+service_logs_show_acme_failure() {
+  local cursor="$1"
+  [[ -n "$cursor" ]] || return 1
+  journalctl --no-pager --after-cursor "$cursor" -o cat -u "$SERVICE_NAME" 2>/dev/null |
+    grep -Eqi 'rateLimited|too many failed authorizations|could not get certificate from issuer|obtaining certificate|authorization.*(failed|error)|challenge.*(failed|error)'
+}
+
+stop_acme_retry_loop() {
+  local cursor="$1"
+  service_logs_show_acme_failure "$cursor" || return 1
+  systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+  systemctl reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
+  warn "检测到 ACME 证书申请失败；已停止 Hysteria，避免 systemd 继续重试并消耗 Let’s Encrypt 验证次数。"
+  warn "请修复 DNS、云安全组和系统防火墙后，在“服务控制与诊断”中仅启动一次服务。若日志显示 HTTP 429，请等待其中的 retry after 时间后再启动。"
+  return 0
+}
+
 wait_for_unit() {
   local unit="$1"
   local _
@@ -727,6 +762,40 @@ if (
 ):
     raise SystemExit(1)
 PY
+}
+
+validate_telegram_reconnect_interval() {
+  case "$1" in
+    0 | 300 | 600 | 1800 | 3600) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_toggle() {
+  [[ "$1" == "0" || "$1" == "1" ]]
+}
+
+parse_toggle_value() {
+  case "${1,,}" in
+    on | enable | enabled | yes | y | 1) printf '1\n' ;;
+    off | disable | disabled | no | n | 0) printf '0\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+toggle_label() {
+  [[ "$1" == "1" ]] && printf '开启' || printf '关闭'
+}
+
+telegram_reconnect_interval_label() {
+  case "$1" in
+    0) printf '每次即时提醒' ;;
+    300) printf '5 分钟汇总' ;;
+    600) printf '10 分钟汇总（默认）' ;;
+    1800) printf '30 分钟汇总' ;;
+    3600) printf '1 小时汇总' ;;
+    *) printf '未知' ;;
+  esac
 }
 
 find_free_stats_port() {
@@ -954,6 +1023,85 @@ preflight_ports() {
   fi
 }
 
+vps_security_firewall_is_active() {
+  command -v nft >/dev/null 2>&1 || return 1
+  [[ -f "$VPS_SECURITY_TCP_PORTS_PATH" && ! -L "$VPS_SECURITY_TCP_PORTS_PATH" ]] || return 1
+  [[ -f "$VPS_SECURITY_UDP_PORTS_PATH" && ! -L "$VPS_SECURITY_UDP_PORTS_PATH" ]] || return 1
+  nft list table inet "$VPS_SECURITY_NFT_TABLE" >/dev/null 2>&1
+}
+
+vps_security_ports_cover() {
+  local ports_path="$1"
+  local required_start="$2"
+  local required_end="$3"
+  local port_spec
+  port_spec="$(tr -d '[:space:]' <"$ports_path" 2>/dev/null)" || return 2
+  python3 - "$port_spec" "$required_start" "$required_end" <<'PY'
+import re
+import sys
+
+spec, required_start, required_end = sys.argv[1:]
+required_start = int(required_start)
+required_end = int(required_end)
+intervals = []
+if spec:
+    for value in spec.split(","):
+        match = re.fullmatch(r"([1-9][0-9]{0,4})(?:-([1-9][0-9]{0,4}))?", value)
+        if not match:
+            raise SystemExit(2)
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if not 1 <= start <= end <= 65535:
+            raise SystemExit(2)
+        intervals.append((start, end))
+for start, end in intervals:
+    if start <= required_start and end >= required_end:
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+preflight_vps_security_firewall() {
+  local acme_port="" udp_start udp_end
+  case "$ACME_TYPE" in
+    http) acme_port=80 ;;
+    tls) acme_port=443 ;;
+    dns) ;;
+    *) die "内部错误：未知 ACME 类型 ${ACME_TYPE}。" ;;
+  esac
+  if [[ "$PORT_MODE" == "range" ]]; then
+    udp_start="$HOP_START"
+    udp_end="$HOP_END"
+  else
+    udp_start="$PORT"
+    udp_end="$PORT"
+  fi
+
+  vps_security_firewall_is_active || return 0
+  info "检测到 vps-security-bootstrap 管理的默认拒绝 nftables 防火墙，正在检查 Hy2 所需端口。"
+  if [[ -n "$acme_port" ]]; then
+    if ! vps_security_ports_cover "$VPS_SECURITY_TCP_PORTS_PATH" "$acme_port" "$acme_port"; then
+      die "vps-security-bootstrap 未放行 ACME 所需的 TCP ${acme_port}。请运行它的防火墙菜单，选择“追加额外 TCP 放行端口”，加入 ${acme_port}；云安全组也需要同步放行。"
+    fi
+  fi
+  if ! vps_security_ports_cover "$VPS_SECURITY_UDP_PORTS_PATH" "$udp_start" "$udp_end"; then
+    die "vps-security-bootstrap 未完整放行 Hy2 所需的 UDP ${udp_start}-${udp_end}。请运行它的防火墙菜单，选择“追加额外 UDP 放行端口”，加入 ${udp_start}-${udp_end}；云安全组也需要同步放行。"
+  fi
+  info "vps-security-bootstrap 防火墙端口检查通过。"
+}
+
+show_vps_security_firewall_status() {
+  local tcp_ports="" udp_ports=""
+  if ! vps_security_firewall_is_active; then
+    printf 'vps-security-bootstrap 防火墙：未检测到已加载的受管规则（不代表其他防火墙或云安全组已放行）。\n'
+    return
+  fi
+  tcp_ports="$(tr -d '[:space:]' <"$VPS_SECURITY_TCP_PORTS_PATH" 2>/dev/null || true)"
+  udp_ports="$(tr -d '[:space:]' <"$VPS_SECURITY_UDP_PORTS_PATH" 2>/dev/null || true)"
+  printf 'vps-security-bootstrap 防火墙：已加载；额外 TCP：%s；额外 UDP：%s\n' \
+    "${tcp_ports:-无}" "${udp_ports:-无}"
+}
+
 prompt_install_values() {
   local non_interactive="$1"
   local answer=""
@@ -1101,6 +1249,14 @@ validate_install_values() {
       ;;
     *) die "未知端口模式：$PORT_MODE" ;;
   esac
+  case "${MIMIC_ENABLED:-0}" in
+    0 | 1) ;;
+    *) die "Mimic 开关状态无效。" ;;
+  esac
+  if [[ "$MIMIC_ENABLED" -eq 1 && "$PORT_MODE" != "single" ]]; then
+    die "Mimic 不能与原生端口跳跃共用；请使用 --port PORT 和 --mimic。"
+  fi
+
   validate_password "$PASSWORD" ||
     die "密码必须是 16-128 位，且只能包含字母、数字、下划线和连字符。"
 
@@ -1116,6 +1272,16 @@ validate_install_values() {
       die "Telegram 在线统计端口无效。"
     validate_password "$TELEGRAM_STATS_SECRET" ||
       die "Telegram 在线统计密钥无效。"
+    validate_telegram_reconnect_interval "$TELEGRAM_RECONNECT_INTERVAL" ||
+      die "Telegram 重连汇总间隔无效。"
+    validate_toggle "$TELEGRAM_CONNECTION_ALERTS" ||
+      die "Telegram 新网段提醒开关无效。"
+    validate_toggle "$TELEGRAM_RECONNECT_ALERTS" ||
+      die "Telegram 重连提醒开关无效。"
+    validate_toggle "$TELEGRAM_DAILY_REPORTS" ||
+      die "Telegram 日报开关无效。"
+    validate_toggle "$TELEGRAM_MONTHLY_REPORTS" ||
+      die "Telegram 月报开关无效。"
   fi
 
   if [[ "$MASQUERADE_MODE" == "proxy" ]]; then
@@ -1143,11 +1309,17 @@ load_existing_settings() {
   HOP_END="${HOP_END:-50500}"
   HOP_MIN_INTERVAL="${HOP_MIN_INTERVAL:-15}"
   HOP_MAX_INTERVAL="${HOP_MAX_INTERVAL:-45}"
+  MIMIC_ENABLED="${MIMIC_ENABLED:-0}"
   TELEGRAM_ENABLED="${TELEGRAM_ENABLED:-0}"
   TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
   TELEGRAM_STATS_PORT="${TELEGRAM_STATS_PORT:-}"
   TELEGRAM_STATS_SECRET="${TELEGRAM_STATS_SECRET:-}"
   TELEGRAM_NAME="${TELEGRAM_NAME:-${DOMAIN:-Hy2 节点}}"
+  TELEGRAM_RECONNECT_INTERVAL="${TELEGRAM_RECONNECT_INTERVAL:-600}"
+  TELEGRAM_CONNECTION_ALERTS="${TELEGRAM_CONNECTION_ALERTS:-1}"
+  TELEGRAM_RECONNECT_ALERTS="${TELEGRAM_RECONNECT_ALERTS:-0}"
+  TELEGRAM_DAILY_REPORTS="${TELEGRAM_DAILY_REPORTS:-0}"
+  TELEGRAM_MONTHLY_REPORTS="${TELEGRAM_MONTHLY_REPORTS:-0}"
 }
 
 save_settings() {
@@ -1164,6 +1336,7 @@ save_settings() {
     printf 'HOP_END=%q\n' "$HOP_END"
     printf 'HOP_MIN_INTERVAL=%q\n' "$HOP_MIN_INTERVAL"
     printf 'HOP_MAX_INTERVAL=%q\n' "$HOP_MAX_INTERVAL"
+    printf 'MIMIC_ENABLED=%q\n' "$MIMIC_ENABLED"
     printf 'PASSWORD=%q\n' "$PASSWORD"
     printf 'MASQUERADE_MODE=%q\n' "$MASQUERADE_MODE"
     printf 'MASQUERADE_URL=%q\n' "$MASQUERADE_URL"
@@ -1173,6 +1346,11 @@ save_settings() {
     printf 'TELEGRAM_STATS_PORT=%q\n' "$TELEGRAM_STATS_PORT"
     printf 'TELEGRAM_STATS_SECRET=%q\n' "$TELEGRAM_STATS_SECRET"
     printf 'TELEGRAM_NAME=%q\n' "$TELEGRAM_NAME"
+    printf 'TELEGRAM_RECONNECT_INTERVAL=%q\n' "$TELEGRAM_RECONNECT_INTERVAL"
+    printf 'TELEGRAM_CONNECTION_ALERTS=%q\n' "$TELEGRAM_CONNECTION_ALERTS"
+    printf 'TELEGRAM_RECONNECT_ALERTS=%q\n' "$TELEGRAM_RECONNECT_ALERTS"
+    printf 'TELEGRAM_DAILY_REPORTS=%q\n' "$TELEGRAM_DAILY_REPORTS"
+    printf 'TELEGRAM_MONTHLY_REPORTS=%q\n' "$TELEGRAM_MONTHLY_REPORTS"
   } >"$tmp"; then
     rm -f -- "$tmp"
     return 1
@@ -1406,6 +1584,28 @@ ensure_service_user_and_directories() {
   validate_service_account 1
 }
 
+ensure_mimic_available() {
+  local hysteria_version mimic_relation
+  [[ "${MIMIC_ENABLED:-0}" -eq 1 ]] || return 0
+  hysteria_version="$(installed_version)" ||
+    die "已启用 Mimic，但未能读取当前 Hysteria 版本。"
+  mimic_relation="$(compare_versions "$hysteria_version" "v2.12.0")" ||
+    die "无法验证 Hysteria 是否支持 Mimic。"
+  [[ "$mimic_relation" -ge 0 ]] ||
+    die "Mimic 需要 Hysteria 2 v2.12.0 或更高版本；当前为 ${hysteria_version}，请先运行 hy2-safe update。"
+  command -v mimic >/dev/null 2>&1 ||
+    die "已启用 Mimic，但未找到 mimic 命令。请先按 https://github.com/hack3ric/mimic/releases 安装适合 Debian 与架构的 mimic 和 mimic-dkms 软件包。"
+  mimic --version >/dev/null 2>&1 ||
+    die "已启用 Mimic，但 mimic 命令无法正常执行。请检查 mimic、DKMS 模块和当前内核。"
+  warn "Mimic 已启用：Hysteria 服务将以 root 运行；所有客户端必须在 Linux 上安装 mimic 并启用同一配置。"
+}
+
+restore_unprivileged_acme_ownership() {
+  [[ "${MIMIC_ENABLED:-0}" -eq 0 ]] || return 0
+  [[ -d "${STATE_DIR}/acme" && ! -L "${STATE_DIR}/acme" ]] || return 0
+  find -P "${STATE_DIR}/acme" -xdev \( -type d -o -type f \) -exec chown hysteria:hysteria {} +
+}
+
 write_config() {
   local tmp
   tmp="$(mktemp "${CONFIG_DIR}/.config.yaml.XXXXXX")"
@@ -1435,6 +1635,10 @@ write_config() {
     printf 'congestion:\n'
     printf '  type: bbr\n'
     printf '  bbrProfile: conservative\n\n'
+    if [[ "${MIMIC_ENABLED:-0}" -eq 1 ]]; then
+      printf 'mimic:\n'
+      printf '  enabled: true\n\n'
+    fi
     if [[ "${TELEGRAM_ENABLED:-0}" -eq 1 ]]; then
       printf 'trafficStats:\n'
       printf '  listen: "127.0.0.1:%s"\n' "$TELEGRAM_STATS_PORT"
@@ -1497,13 +1701,15 @@ import sys
 import time
 import unicodedata
 import urllib.parse
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
 
 
 BEIJING = dt.timezone(dt.timedelta(hours=8))
-HOURLY_SECONDS = 3600
+DEFAULT_RECONNECT_SUMMARY_SECONDS = 600
+RECONNECT_SUMMARY_INTERVALS = {0, 300, 600, 1800, 3600}
 QUIET_RESET_SECONDS = 86400
 MAX_GROUPS = 512
 MAX_OUTBOX = 128
@@ -1516,6 +1722,9 @@ MONTHLY_REPORT_MINUTE = 5
 TRAFFIC_DAY_RETENTION = 70
 MAX_INTERFACES = 16
 MAX_JOURNAL_BUFFER = 2 * 1024 * 1024
+RETRY_BASE_SECONDS = 30
+RETRY_MAX_SECONDS = 900
+RETRY_JITTER_SECONDS = 15
 
 state_dir = Path(os.environ.get("STATE_DIRECTORY", "/var/lib/hy2-safe-notifier"))
 state_path = state_dir / "state.json"
@@ -1549,6 +1758,13 @@ def load_config() -> dict[str, Any]:
     stats_port = value.get("stats_port")
     stats_secret = value.get("stats_secret")
     display_name = value.get("display_name", "Hy2 节点")
+    reconnect_summary_seconds = value.get(
+        "reconnect_summary_seconds", DEFAULT_RECONNECT_SUMMARY_SECONDS
+    )
+    connection_alerts = value.get("connection_alerts", True)
+    reconnect_alerts = value.get("reconnect_alerts", False)
+    daily_reports = value.get("daily_reports", False)
+    monthly_reports = value.get("monthly_reports", False)
     if (
         not isinstance(token, str)
         or not 20 <= len(token) <= 200
@@ -1573,12 +1789,28 @@ def load_config() -> dict[str, Any]:
         or any(unicodedata.category(char).startswith("C") for char in display_name)
     ):
         raise RuntimeError("invalid Telegram display name")
+    if (
+        not isinstance(reconnect_summary_seconds, int)
+        or isinstance(reconnect_summary_seconds, bool)
+        or reconnect_summary_seconds not in RECONNECT_SUMMARY_INTERVALS
+    ):
+        raise RuntimeError("invalid reconnect summary interval")
+    if not all(
+        isinstance(option, bool)
+        for option in (connection_alerts, reconnect_alerts, daily_reports, monthly_reports)
+    ):
+        raise RuntimeError("invalid Telegram notification preferences")
     return {
         "token": token,
         "chat_id": chat_id,
         "stats_port": stats_port,
         "stats_secret": stats_secret,
         "display_name": display_name,
+        "reconnect_summary_seconds": reconnect_summary_seconds,
+        "connection_alerts": connection_alerts,
+        "reconnect_alerts": reconnect_alerts,
+        "daily_reports": daily_reports,
+        "monthly_reports": monthly_reports,
     }
 
 
@@ -1652,7 +1884,7 @@ def normalize_groups(value: Any) -> dict[str, Any]:
             "last_seen": last_seen,
             "total": nonnegative_int(group.get("total")),
             "pending_reconnects": nonnegative_int(group.get("pending_reconnects")),
-            "last_summary": last_summary or first_seen,
+            "last_summary": last_summary,
         }
     return result
 
@@ -1855,6 +2087,12 @@ def extract_connection(entry: dict[str, Any]) -> tuple[str, float] | None:
     return address, timestamp
 
 
+class TelegramRateLimitError(RuntimeError):
+    def __init__(self, retry_after: int) -> None:
+        super().__init__("Telegram rate limit")
+        self.retry_after = retry_after
+
+
 def telegram_call(config: dict[str, Any], method: str, fields: dict[str, str]) -> Any:
     url = f"https://api.telegram.org/bot{config['token']}/{method}"
     request = urllib.request.Request(
@@ -1863,8 +2101,26 @@ def telegram_call(config: dict[str, Any], method: str, fields: dict[str, str]) -
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=12) as response:
-        raw = response.read(1_048_577)
+    try:
+        with urllib.request.urlopen(request, timeout=12) as response:
+            raw = response.read(1_048_577)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read(1_048_577)
+        if len(raw) > 1_048_576:
+            raise RuntimeError("Telegram error response is too large") from exc
+        try:
+            error = json.loads(raw.decode("utf-8"))
+            retry_after = error.get("parameters", {}).get("retry_after")
+        except (AttributeError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+            retry_after = None
+        if (
+            exc.code == 429
+            and isinstance(retry_after, int)
+            and not isinstance(retry_after, bool)
+            and 1 <= retry_after <= 86_400
+        ):
+            raise TelegramRateLimitError(retry_after) from exc
+        raise RuntimeError(f"Telegram HTTP status {exc.code}") from exc
     if len(raw) > 1_048_576:
         raise RuntimeError("Telegram response is too large")
     result = json.loads(raw.decode("utf-8"))
@@ -2114,7 +2370,7 @@ def queue_message(
     silent: bool = False,
 ) -> None:
     outbox = state["outbox"]
-    outbox[key] = {"text": text, "created": now, "silent": silent}
+    outbox[key] = {"text": text, "created": now, "silent": silent, "attempts": 0}
     if len(outbox) <= MAX_OUTBOX:
         return
     oldest = sorted(
@@ -2158,45 +2414,69 @@ def process_connection(
             "last_seen": timestamp,
             "total": 1,
             "pending_reconnects": 0,
-            "last_summary": timestamp,
+            # The first reconnect after a new source is reported immediately.
+            "last_summary": 0.0,
         }
         groups[key] = group
-        queue_message(
-            state,
-            f"new:{key}",
-            "\n".join(
-                [
-                    "<b>🛡️ Hy2 新连接</b>",
-                    instance_line(config),
-                    "",
-                    f"🌐 来源　<code>{html.escape(label)}</code>",
-                    f"🕐 时间　<code>{format_time(timestamp)}</code>",
-                    online_line(config),
-                    "",
-                    "⚠️ 如果不是本人，请立即更换 Hy2 密码",
-                ]
-            ),
-            timestamp,
-        )
-    else:
-        previous_last_seen = float(group.get("last_seen", timestamp))
-        group["last_seen"] = timestamp
-        group["total"] = int(group.get("total", 0)) + 1
-        group["pending_reconnects"] = int(group.get("pending_reconnects", 0)) + 1
-        if timestamp - previous_last_seen >= QUIET_RESET_SECONDS:
+        if config.get("connection_alerts", True):
             queue_message(
                 state,
-                f"returned:{key}",
+                f"new:{key}",
                 "\n".join(
                     [
-                        "<b>🛡️ Hy2 来源再次出现</b>",
+                        "<b>🛡️ Hy2 新连接</b>",
                         instance_line(config),
                         "",
                         f"🌐 来源　<code>{html.escape(label)}</code>",
                         f"🕐 时间　<code>{format_time(timestamp)}</code>",
                         online_line(config),
                         "",
-                        "ℹ️ 该来源超过 24 小时没有出现",
+                        "⚠️ 如果不是本人，请立即更换 Hy2 密码",
+                    ]
+                ),
+                timestamp,
+            )
+    else:
+        previous_last_seen = float(group.get("last_seen", timestamp))
+        group["last_seen"] = timestamp
+        group["total"] = int(group.get("total", 0)) + 1
+        group["pending_reconnects"] = int(group.get("pending_reconnects", 0)) + 1
+        if timestamp - previous_last_seen >= QUIET_RESET_SECONDS:
+            if config.get("connection_alerts", True):
+                queue_message(
+                    state,
+                    f"returned:{key}",
+                    "\n".join(
+                        [
+                            "<b>🛡️ Hy2 来源再次出现</b>",
+                            instance_line(config),
+                            "",
+                            f"🌐 来源　<code>{html.escape(label)}</code>",
+                            f"🕐 时间　<code>{format_time(timestamp)}</code>",
+                            online_line(config),
+                            "",
+                            "ℹ️ 该来源超过 24 小时没有出现",
+                        ]
+                    ),
+                    timestamp,
+                )
+            group["pending_reconnects"] = 0
+            group["last_summary"] = timestamp
+        elif not config.get("reconnect_alerts", False):
+            group["pending_reconnects"] = 0
+            group["last_summary"] = timestamp
+        elif config["reconnect_summary_seconds"] == 0:
+            queue_message(
+                state,
+                f"reconnect:{key}",
+                "\n".join(
+                    [
+                        "<b>🔄 Hy2 客户端重连</b>",
+                        instance_line(config),
+                        "",
+                        f"🌐 来源　<code>{html.escape(label)}</code>",
+                        f"🕐 时间　<code>{format_time(timestamp)}</code>",
+                        online_line(config),
                     ]
                 ),
                 timestamp,
@@ -2205,25 +2485,35 @@ def process_connection(
             group["last_summary"] = timestamp
 
 
-def queue_hourly_summaries(
+def queue_reconnect_summaries(
     state: dict[str, Any], config: dict[str, Any], now: float
 ) -> None:
+    interval = int(config["reconnect_summary_seconds"])
+    if interval == 0 or not config.get("reconnect_alerts", False):
+        return
     for key, group in state["groups"].items():
         pending = int(group.get("pending_reconnects", 0))
         last_summary = float(group.get("last_summary", group.get("first_seen", now)))
-        if pending <= 0 or now - last_summary < HOURLY_SECONDS:
+        if pending <= 0 or now - last_summary < interval:
             continue
+        is_first = last_summary <= 0
+        title = "<b>🔄 Hy2 客户端重连</b>" if is_first else "<b>🔄 Hy2 重连汇总</b>"
+        count_line = (
+            "🔁 本次重连　<b>1</b> 次"
+            if is_first and pending == 1
+            else f"🔁 近 {interval // 60} 分钟重连　<b>{pending}</b> 次"
+        )
         queue_message(
             state,
-            f"hourly:{key}",
+            f"reconnect-summary:{key}",
             "\n".join(
                 [
-                    "<b>🔄 Hy2 重连汇总</b>",
+                    title,
                     instance_line(config),
                     "",
                     f"🌐 来源　<code>{html.escape(str(group['label']))}</code>",
                     f"🕐 最近　<code>{format_time(float(group['last_seen']))}</code>",
-                    f"🔁 重连　<b>{pending}</b> 次",
+                    count_line,
                     online_line(config),
                 ]
             ),
@@ -2449,7 +2739,9 @@ def queue_scheduled_reports(
     today = local.date()
     yesterday = (today - dt.timedelta(days=1)).isoformat()
     daily_ready = (local.hour, local.minute) >= (REPORT_HOUR, REPORT_MINUTE)
-    if daily_ready and state.get("last_daily_report") != yesterday:
+    if daily_ready and not config.get("daily_reports", False):
+        state["last_daily_report"] = yesterday
+    elif daily_ready and state.get("last_daily_report") != yesterday:
         if str(state.get("reporting_started_date", today.isoformat())) <= yesterday:
             queue_message(
                 state,
@@ -2466,7 +2758,9 @@ def queue_scheduled_reports(
     )
     previous_month_date = today.replace(day=1) - dt.timedelta(days=1)
     previous_month = previous_month_date.strftime("%Y-%m")
-    if monthly_ready and state.get("last_monthly_report") != previous_month:
+    if monthly_ready and not config.get("monthly_reports", False):
+        state["last_monthly_report"] = previous_month
+    elif monthly_ready and state.get("last_monthly_report") != previous_month:
         started = str(state.get("reporting_started_date", today.isoformat()))
         if (
             records_for_month(state, previous_month)
@@ -2544,8 +2838,16 @@ def flush_outbox(
                 silent=bool(item.get("silent", False)),
             )
         except Exception as exc:  # Telegram/network errors must not stop Hysteria.
-            log(f"Telegram 发送失败，将在 5 分钟后重试：{type(exc).__name__}")
-            return now + 300
+            attempts = min(6, max(0, int(item.get("attempts", 0))) + 1)
+            item["attempts"] = attempts
+            jitter = sum(key.encode("utf-8")) % (RETRY_JITTER_SECONDS + 1)
+            delay = min(RETRY_MAX_SECONDS, RETRY_BASE_SECONDS * (2 ** (attempts - 1)))
+            delay += jitter
+            if isinstance(exc, TelegramRateLimitError):
+                delay = max(delay, exc.retry_after)
+            log(f"Telegram 发送失败，将在 {delay} 秒后重试：{type(exc).__name__}")
+            atomic_write_json(state_path, state)
+            return now + delay
         del state["outbox"][key]
         sent += 1
         if sent >= 3:
@@ -2673,7 +2975,7 @@ def main() -> int:
         if manual_report_requested:
             queue_manual_report(state, config, now)
             manual_report_requested = False
-        queue_hourly_summaries(state, config, now)
+        queue_reconnect_summaries(state, config, now)
         queue_scheduled_reports(state, config, now)
         prune_state(state, now)
         prune_traffic_days(state, now)
@@ -2746,9 +3048,18 @@ EOF
 write_systemd_units() {
   local service_capabilities="CAP_NET_BIND_SERVICE"
   local service_address_families="AF_INET AF_INET6 AF_UNIX"
+  local service_identity=$'User=hysteria\nGroup=hysteria'
+  local service_capability_lines=$'AmbientCapabilities=CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE'
+  local service_kernel_modules="ProtectKernelModules=true"
   if [[ "$PORT_MODE" == "range" ]]; then
     service_capabilities+=" CAP_NET_ADMIN"
     service_address_families+=" AF_NETLINK"
+    service_capability_lines=$'AmbientCapabilities='"${service_capabilities}"$'\nCapabilityBoundingSet='"${service_capabilities}"
+  fi
+  if [[ "${MIMIC_ENABLED:-0}" -eq 1 ]]; then
+    service_identity=$'User=root\nGroup=root'
+    service_capability_lines="# Mimic attaches eBPF programs and requires root privileges."
+    service_kernel_modules="ProtectKernelModules=false"
   fi
   cat >"$SERVICE_PATH" <<EOF
 [Unit]
@@ -2756,22 +3067,23 @@ Description=Hysteria 2 Server
 Documentation=https://v2.hysteria.network/
 Wants=network-online.target
 After=network-online.target
+StartLimitIntervalSec=1h
+StartLimitBurst=3
 
 [Service]
 Type=simple
-User=hysteria
-Group=hysteria
+${service_identity}
 WorkingDirectory=${STATE_DIR}
 ExecStartPre=+${MANAGER_PATH} verify-service-account
 ExecStart=${BIN_PATH} server --config ${CONFIG_PATH}
 Restart=on-failure
-RestartSec=5s
+# A bad ACME route must not create a rapid certificate-authorization loop.
+RestartSec=30s
 UMask=0077
 
 Environment=HYSTERIA_DISABLE_UPDATE_CHECK=1
 Environment=HYSTERIA_LOG_LEVEL=info
-AmbientCapabilities=${service_capabilities}
-CapabilityBoundingSet=${service_capabilities}
+${service_capability_lines}
 NoNewPrivileges=true
 PrivateDevices=true
 PrivateTmp=true
@@ -2780,7 +3092,7 @@ ProtectControlGroups=true
 ProtectHome=true
 ProtectHostname=true
 ProtectKernelLogs=true
-ProtectKernelModules=true
+${service_kernel_modules}
 ProtectKernelTunables=true
 ProtectProc=invisible
 ProcSubset=pid
@@ -2952,6 +3264,7 @@ refresh_managed_runtime() {
   exec 8>"$LOCK_PATH"
   flock -n 8 || die "另一个 hy2-safe 任务正在运行。"
   ensure_service_user_and_directories
+  ensure_mimic_available
   install_manager_copy
   write_systemd_units
   flock -u 8
@@ -3095,7 +3408,7 @@ data = urllib.parse.urlencode(
         "text": (
             "<b>✅ hy2-safe 验证成功</b>\n\n"
             f"🏷️ 节点　<b>{html.escape(display_name)}</b>\n\n"
-            "连接提醒、流量日报和月报将发送到此私人聊天。"
+            "证书告警和你启用的通知类型将发送到此私人聊天。"
         ),
         "parse_mode": "HTML",
         "protect_content": "true",
@@ -3133,11 +3446,16 @@ write_telegram_config() {
     "$TELEGRAM_STATS_PORT" \
     "$TELEGRAM_STATS_SECRET" \
     "$TELEGRAM_NAME" \
+    "$TELEGRAM_RECONNECT_INTERVAL" \
+    "$TELEGRAM_CONNECTION_ALERTS" \
+    "$TELEGRAM_RECONNECT_ALERTS" \
+    "$TELEGRAM_DAILY_REPORTS" \
+    "$TELEGRAM_MONTHLY_REPORTS" \
     "$tmp" <<'PY'
 import json
 import sys
 
-token_path, chat_id, stats_port, stats_secret, display_name, output_path = sys.argv[1:]
+token_path, chat_id, stats_port, stats_secret, display_name, reconnect_interval, connection_alerts, reconnect_alerts, daily_reports, monthly_reports, output_path = sys.argv[1:]
 token = open(token_path, "r", encoding="utf-8").read().strip()
 value = {
     "token": token,
@@ -3145,6 +3463,11 @@ value = {
     "stats_port": int(stats_port),
     "stats_secret": stats_secret,
     "display_name": display_name,
+    "reconnect_summary_seconds": int(reconnect_interval),
+    "connection_alerts": bool(int(connection_alerts)),
+    "reconnect_alerts": bool(int(reconnect_alerts)),
+    "daily_reports": bool(int(daily_reports)),
+    "monthly_reports": bool(int(monthly_reports)),
 }
 with open(output_path, "w", encoding="utf-8") as handle:
     json.dump(value, handle, separators=(",", ":"))
@@ -3166,17 +3489,36 @@ sync_telegram_name_config() {
   local tmp
   validate_telegram_name "$TELEGRAM_NAME" ||
     return 1
+  validate_telegram_reconnect_interval "$TELEGRAM_RECONNECT_INTERVAL" ||
+    return 1
+  validate_toggle "$TELEGRAM_CONNECTION_ALERTS" || return 1
+  validate_toggle "$TELEGRAM_RECONNECT_ALERTS" || return 1
+  validate_toggle "$TELEGRAM_DAILY_REPORTS" || return 1
+  validate_toggle "$TELEGRAM_MONTHLY_REPORTS" || return 1
   tmp="$(mktemp "${CONFIG_DIR}/.telegram-notifier.XXXXXX")"
-  if ! python3 - "$NOTIFIER_CONFIG_PATH" "$TELEGRAM_NAME" "$tmp" <<'PY'
+  if ! python3 - \
+    "$NOTIFIER_CONFIG_PATH" \
+    "$TELEGRAM_NAME" \
+    "$TELEGRAM_RECONNECT_INTERVAL" \
+    "$TELEGRAM_CONNECTION_ALERTS" \
+    "$TELEGRAM_RECONNECT_ALERTS" \
+    "$TELEGRAM_DAILY_REPORTS" \
+    "$TELEGRAM_MONTHLY_REPORTS" \
+    "$tmp" <<'PY'
 import json
 import sys
 
-source_path, display_name, output_path = sys.argv[1:]
+source_path, display_name, reconnect_interval, connection_alerts, reconnect_alerts, daily_reports, monthly_reports, output_path = sys.argv[1:]
 with open(source_path, "r", encoding="utf-8") as handle:
     value = json.load(handle)
 if not isinstance(value, dict):
     raise SystemExit("Telegram config root must be an object")
 value["display_name"] = display_name
+value["reconnect_summary_seconds"] = int(reconnect_interval)
+value["connection_alerts"] = bool(int(connection_alerts))
+value["reconnect_alerts"] = bool(int(reconnect_alerts))
+value["daily_reports"] = bool(int(daily_reports))
+value["monthly_reports"] = bool(int(monthly_reports))
 with open(output_path, "w", encoding="utf-8") as handle:
     json.dump(value, handle, ensure_ascii=False, separators=(",", ":"))
     handle.write("\n")
@@ -3487,6 +3829,14 @@ parse_config_options() {
         PORT_VALUE_WAS_SET=1
         shift 2
         ;;
+      --mimic)
+        MIMIC_ENABLED=1
+        shift
+        ;;
+      --no-mimic)
+        MIMIC_ENABLED=0
+        shift
+        ;;
       --hop-min)
         [[ "$#" -ge 2 ]] || die "--hop-min 缺少参数。"
         HOP_MIN_INTERVAL="$2"
@@ -3550,7 +3900,7 @@ parse_config_options() {
 }
 
 show_client() {
-  local server_address official_share compatible_share share_output transport_config firewall_ports
+  local server_address official_share compatible_share share_output transport_config client_mimic_config firewall_ports
   require_root
   load_existing_settings || die "未找到由 hy2-safe 管理的配置。"
   warn "下面会显示完整 Hy2 密码和分享链接；不要截图、录屏或发送到群聊/公开仓库。"
@@ -3586,6 +3936,16 @@ EOF
     firewall_ports="$PORT"
     transport_config=""
   fi
+  client_mimic_config=""
+  if [[ "${MIMIC_ENABLED:-0}" -eq 1 ]]; then
+    client_mimic_config="$(cat <<'EOF'
+mimic:
+  enabled: true
+
+EOF
+)"
+    share_output="Mimic 已启用：分享链接无法包含 Mimic 设置；请使用下面完整 YAML。客户端必须是 Linux、已安装 mimic，并使用 Hysteria 2 v2.12.0 或更高版本。"
+  fi
   cat <<EOF
 Hysteria 2 官方客户端完整 YAML（本机 SOCKS5：127.0.0.1:1080）：
 
@@ -3597,6 +3957,7 @@ congestion:
   type: bbr
   bbrProfile: conservative
 ${transport_config}
+${client_mimic_config}
 socks5:
   listen: 127.0.0.1:1080
 
@@ -3607,7 +3968,7 @@ EOF
 }
 
 command_install() {
-  local install_arg acme_requirement
+  local install_arg acme_requirement acme_log_cursor
   require_root
   require_systemd
   require_supported_os
@@ -3638,6 +3999,7 @@ command_install() {
     HOP_END="50500"
     HOP_MIN_INTERVAL="15"
     HOP_MAX_INTERVAL="45"
+    MIMIC_ENABLED=0
     PASSWORD=""
     MASQUERADE_MODE="static"
     MASQUERADE_URL=""
@@ -3647,6 +4009,11 @@ command_install() {
     TELEGRAM_STATS_PORT=""
     TELEGRAM_STATS_SECRET=""
     TELEGRAM_NAME=""
+    TELEGRAM_RECONNECT_INTERVAL=600
+    TELEGRAM_CONNECTION_ALERTS=1
+    TELEGRAM_RECONNECT_ALERTS=0
+    TELEGRAM_DAILY_REPORTS=0
+    TELEGRAM_MONTHLY_REPORTS=0
   fi
   parse_config_options "$@"
   [[ -n "$TELEGRAM_NAME" ]] || TELEGRAM_NAME="${DOMAIN:-Hy2 节点}"
@@ -3656,6 +4023,7 @@ command_install() {
   preflight_domain
   [[ "$ACME_TYPE" != "dns" ]] || verify_cloudflare_token_access
   preflight_ports
+  preflight_vps_security_firewall
   case "$ACME_TYPE" in
     http) acme_requirement="TCP 80" ;;
     tls) acme_requirement="TCP 443" ;;
@@ -3669,14 +4037,18 @@ command_install() {
   install_manager_copy
   fetch_verified_release
   install_fetched_binary 0
+  ensure_mimic_available
+  restore_unprivileged_acme_ownership
   write_config
   save_settings
   write_systemd_units
   configure_update_timer
   configure_health_timer
 
+  acme_log_cursor="$(service_log_cursor)"
   systemctl enable "$SERVICE_NAME"
   if ! systemctl restart "$SERVICE_NAME" || ! wait_for_service; then
+    stop_acme_retry_loop "$acme_log_cursor" || true
     journalctl --no-pager -n 40 -u "$SERVICE_NAME" >&2 || true
     die "Hysteria 服务启动失败。请检查域名解析、${acme_requirement}、UDP 端口和服务日志。"
   fi
@@ -3717,7 +4089,7 @@ command_install() {
 }
 
 command_configure() {
-  local old_auto_update old_udp_start="" old_udp_end=""
+  local old_auto_update old_udp_start="" old_udp_end="" acme_log_cursor
   require_root
   require_systemd
   load_existing_settings || die "请先执行 install。"
@@ -3738,11 +4110,14 @@ command_configure() {
   preflight_domain
   [[ "$ACME_TYPE" != "dns" ]] || verify_cloudflare_token_access
   preflight_ports "$old_udp_start" "$old_udp_end"
+  preflight_vps_security_firewall
 
   exec 9>"$LOCK_PATH"
   flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
 
   ensure_service_user_and_directories
+  ensure_mimic_available
+  restore_unprivileged_acme_ownership
   TMP_ROOT="$(mktemp -d /tmp/hy2-safe.XXXXXXXX)"
   cp --preserve=mode,ownership,timestamps -- "$CONFIG_PATH" "${TMP_ROOT}/config.yaml"
   cp --preserve=mode,ownership,timestamps -- "$SETTINGS_PATH" "${TMP_ROOT}/hy2-safe.env"
@@ -3753,7 +4128,12 @@ command_configure() {
   write_systemd_units
   configure_update_timer
   configure_health_timer
+  acme_log_cursor="$(service_log_cursor)"
   if ! systemctl restart "$SERVICE_NAME" || ! wait_for_service; then
+    if stop_acme_retry_loop "$acme_log_cursor"; then
+      journalctl --no-pager -n 40 -u "$SERVICE_NAME" >&2 || true
+      die "新配置已保存，但 Hysteria 因 ACME 证书申请失败而未启动；没有回滚并再次重启。请修复外部条件后运行 hy2-safe service start。"
+    fi
     warn "新配置启动失败，正在恢复上一份配置。"
     cp --preserve=mode,ownership,timestamps -- "${TMP_ROOT}/config.yaml" "$CONFIG_PATH"
     cp --preserve=mode,ownership,timestamps -- "${TMP_ROOT}/hy2-safe.env" "$SETTINGS_PATH"
@@ -3797,7 +4177,7 @@ command_telegram_setup() {
   local token_input_file=""
   local requested_chat_id=""
   local name_was_set=0
-  local token_file candidates_file old_enabled pairing_code confirmation answer
+  local token_file candidates_file old_enabled pairing_code confirmation answer acme_log_cursor
   require_root
   require_systemd
   install_dependencies
@@ -3905,6 +4285,7 @@ command_telegram_setup() {
   [[ -n "$TELEGRAM_STATS_SECRET" ]] ||
     TELEGRAM_STATS_SECRET="$(random_password)"
   validate_install_values
+  preflight_vps_security_firewall
 
   if ! write_config ||
     ! save_settings ||
@@ -3914,7 +4295,15 @@ command_telegram_setup() {
     restore_telegram_change "$TMP_ROOT" "$old_enabled"
     die "Telegram 提醒启用失败，已恢复原配置。"
   fi
+  acme_log_cursor="$(service_log_cursor)"
   if ! systemctl restart "$SERVICE_NAME" || ! wait_for_service; then
+    if stop_acme_retry_loop "$acme_log_cursor"; then
+      systemctl enable "$NOTIFIER_NAME" >/dev/null 2>&1 ||
+        warn "Telegram 提醒已保存，但未能设为开机启动；请在 Hy2 恢复后重新运行 hy2-safe telegram-setup。"
+      journalctl --no-pager -n 40 -u "$SERVICE_NAME" >&2 || true
+      warn "Telegram 提醒配置已保存；Hysteria 因 ACME 证书申请失败而未启动，没有回滚并再次重启。修复后运行 hy2-safe service start。"
+      return
+    fi
     warn "启用 Telegram 统计接口后 Hysteria 启动失败，正在回滚。"
     restore_telegram_change "$TMP_ROOT" "$old_enabled"
     journalctl --no-pager -n 40 -u "$SERVICE_NAME" >&2 || true
@@ -3928,7 +4317,7 @@ command_telegram_setup() {
   fi
 
   info "Telegram 提醒已启用，消息名称为【${TELEGRAM_NAME}】，只会向 Chat ID ${TELEGRAM_CHAT_ID} 主动发送消息。"
-  printf '规则：新 IP 网段立即提醒；相同网段一小时内合并；北京时间每天 08:00 静默发送前一日日报，每月 1 日 08:05 静默发送上月月报。\n'
+  printf '默认：证书告警和新 IP 网段提醒开启；重连汇总、日报和月报关闭。可在“设置 Telegram 通知偏好”中分别调整。\n'
 }
 
 command_telegram_replace() {
@@ -4026,6 +4415,162 @@ command_telegram_name() {
   fi
 }
 
+command_telegram_reconnect_interval() {
+  local requested="" old_interval
+  require_root
+  require_systemd
+  load_existing_settings || die "请先安装 Hy2。"
+  [[ "$TELEGRAM_ENABLED" -eq 1 && -f "$NOTIFIER_CONFIG_PATH" ]] ||
+    die "Telegram 提醒尚未启用。"
+  validate_root_secret_file "$NOTIFIER_CONFIG_PATH" "Telegram 凭据文件"
+
+  if [[ "$#" -gt 1 ]]; then
+    die "用法：hy2-safe telegram-reconnect-interval [immediate|5m|10m|30m|1h]"
+  elif [[ "$#" -eq 1 ]]; then
+    case "${1,,}" in
+      immediate | 0) requested=0 ;;
+      5m | 300) requested=300 ;;
+      10m | 600) requested=600 ;;
+      30m | 1800) requested=1800 ;;
+      1h | 3600) requested=3600 ;;
+      -h | --help)
+        printf '用法：hy2-safe telegram-reconnect-interval [immediate|5m|10m|30m|1h]\n'
+        printf '默认 10m：首次重连即时提醒，同一来源后续重连按所选窗口汇总。\n'
+        return
+        ;;
+      *) die "无效的重连提醒频率：$1" ;;
+    esac
+  elif [[ -t 0 ]]; then
+    printf '当前重连提醒频率：%s\n' "$(telegram_reconnect_interval_label "$TELEGRAM_RECONNECT_INTERVAL")"
+    printf '  1) 每次即时提醒\n  2) 5 分钟汇总\n  3) 10 分钟汇总（推荐）\n  4) 30 分钟汇总\n  5) 1 小时汇总\n'
+    prompt_input "请选择 [1-5，直接回车保留当前设置]: " requested
+    case "$requested" in
+      "") requested="$TELEGRAM_RECONNECT_INTERVAL" ;;
+      1) requested=0 ;;
+      2) requested=300 ;;
+      3) requested=600 ;;
+      4) requested=1800 ;;
+      5) requested=3600 ;;
+      *) die "无效选项：$requested" ;;
+    esac
+  else
+    die "非交互模式请提供频率，例如：hy2-safe telegram-reconnect-interval 10m"
+  fi
+
+  validate_telegram_reconnect_interval "$requested" || die "Telegram 重连汇总间隔无效。"
+  old_interval="$TELEGRAM_RECONNECT_INTERVAL"
+  if [[ "$requested" == "$old_interval" ]]; then
+    info "Telegram 重连提醒频率未改变：$(telegram_reconnect_interval_label "$old_interval")。"
+    return
+  fi
+
+  exec 9>"$LOCK_PATH"
+  flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  TMP_ROOT="$(mktemp -d /tmp/hy2-safe.XXXXXXXX)"
+  cp --preserve=mode,ownership,timestamps -- "$SETTINGS_PATH" "${TMP_ROOT}/hy2-safe.env"
+  cp --preserve=mode,ownership,timestamps -- \
+    "$NOTIFIER_CONFIG_PATH" "${TMP_ROOT}/telegram-notifier.json"
+
+  TELEGRAM_RECONNECT_INTERVAL="$requested"
+  if ! save_settings || ! sync_telegram_name_config ||
+    ! systemctl restart "$NOTIFIER_NAME" || ! wait_for_unit "$NOTIFIER_NAME"; then
+    TELEGRAM_RECONNECT_INTERVAL="$old_interval"
+    cp --preserve=mode,ownership,timestamps -- \
+      "${TMP_ROOT}/hy2-safe.env" "$SETTINGS_PATH"
+    cp --preserve=mode,ownership,timestamps -- \
+      "${TMP_ROOT}/telegram-notifier.json" "$NOTIFIER_CONFIG_PATH"
+    systemctl restart "$NOTIFIER_NAME" >/dev/null 2>&1 || true
+    die "Telegram 重连提醒频率修改失败，已恢复原设置。"
+  fi
+  info "Telegram 重连提醒频率已设为：$(telegram_reconnect_interval_label "$TELEGRAM_RECONNECT_INTERVAL")。"
+}
+
+command_telegram_preferences() {
+  local old_connection old_reconnect old_daily old_monthly requested
+  require_root
+  require_systemd
+  load_existing_settings || die "请先安装 Hy2。"
+  [[ "$TELEGRAM_ENABLED" -eq 1 && -f "$NOTIFIER_CONFIG_PATH" ]] ||
+    die "Telegram 提醒尚未启用。"
+  validate_root_secret_file "$NOTIFIER_CONFIG_PATH" "Telegram 凭据文件"
+  old_connection="$TELEGRAM_CONNECTION_ALERTS"
+  old_reconnect="$TELEGRAM_RECONNECT_ALERTS"
+  old_daily="$TELEGRAM_DAILY_REPORTS"
+  old_monthly="$TELEGRAM_MONTHLY_REPORTS"
+
+  if [[ "$#" -eq 0 ]]; then
+    [[ -t 0 ]] || die "非交互模式请使用 --connection/--reconnect/--daily/--monthly on|off。"
+    printf 'Telegram 通知偏好（证书告警始终保留）：\n'
+    if prompt_yes_no "新网段首次连接提醒？" "$([[ "$TELEGRAM_CONNECTION_ALERTS" == "1" ]] && printf yes || printf no)"; then
+      TELEGRAM_CONNECTION_ALERTS=1
+    else
+      TELEGRAM_CONNECTION_ALERTS=0
+    fi
+    if prompt_yes_no "同网段重连汇总提醒？" "$([[ "$TELEGRAM_RECONNECT_ALERTS" == "1" ]] && printf yes || printf no)"; then
+      TELEGRAM_RECONNECT_ALERTS=1
+    else
+      TELEGRAM_RECONNECT_ALERTS=0
+    fi
+    if prompt_yes_no "每日流量报告？" "$([[ "$TELEGRAM_DAILY_REPORTS" == "1" ]] && printf yes || printf no)"; then
+      TELEGRAM_DAILY_REPORTS=1
+    else
+      TELEGRAM_DAILY_REPORTS=0
+    fi
+    if prompt_yes_no "每月流量报告？" "$([[ "$TELEGRAM_MONTHLY_REPORTS" == "1" ]] && printf yes || printf no)"; then
+      TELEGRAM_MONTHLY_REPORTS=1
+    else
+      TELEGRAM_MONTHLY_REPORTS=0
+    fi
+  else
+    while [[ "$#" -gt 0 ]]; do
+      case "$1" in
+        -h | --help)
+          printf '用法：hy2-safe telegram-preferences [--connection on|off] [--reconnect on|off] [--daily on|off] [--monthly on|off]\n'
+          printf '证书到期或续期失败告警始终开启；默认仅开启新网段首次连接提醒。\n'
+          return
+          ;;
+      esac
+      [[ "$#" -ge 2 ]] || die "${1} 缺少 on 或 off 参数。"
+      requested="$(parse_toggle_value "$2")" || die "${1} 只能使用 on 或 off。"
+      case "$1" in
+        --connection) TELEGRAM_CONNECTION_ALERTS="$requested" ;;
+        --reconnect) TELEGRAM_RECONNECT_ALERTS="$requested" ;;
+        --daily) TELEGRAM_DAILY_REPORTS="$requested" ;;
+        --monthly) TELEGRAM_MONTHLY_REPORTS="$requested" ;;
+        *) die "未知 Telegram 偏好选项：$1" ;;
+      esac
+      shift 2
+    done
+  fi
+
+  validate_toggle "$TELEGRAM_CONNECTION_ALERTS" || die "Telegram 新网段提醒开关无效。"
+  validate_toggle "$TELEGRAM_RECONNECT_ALERTS" || die "Telegram 重连提醒开关无效。"
+  validate_toggle "$TELEGRAM_DAILY_REPORTS" || die "Telegram 日报开关无效。"
+  validate_toggle "$TELEGRAM_MONTHLY_REPORTS" || die "Telegram 月报开关无效。"
+
+  exec 9>"$LOCK_PATH"
+  flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  TMP_ROOT="$(mktemp -d /tmp/hy2-safe.XXXXXXXX)"
+  cp --preserve=mode,ownership,timestamps -- "$SETTINGS_PATH" "${TMP_ROOT}/hy2-safe.env"
+  cp --preserve=mode,ownership,timestamps -- \
+    "$NOTIFIER_CONFIG_PATH" "${TMP_ROOT}/telegram-notifier.json"
+
+  if ! save_settings || ! sync_telegram_name_config ||
+    ! systemctl restart "$NOTIFIER_NAME" || ! wait_for_unit "$NOTIFIER_NAME"; then
+    TELEGRAM_CONNECTION_ALERTS="$old_connection"
+    TELEGRAM_RECONNECT_ALERTS="$old_reconnect"
+    TELEGRAM_DAILY_REPORTS="$old_daily"
+    TELEGRAM_MONTHLY_REPORTS="$old_monthly"
+    cp --preserve=mode,ownership,timestamps -- \
+      "${TMP_ROOT}/hy2-safe.env" "$SETTINGS_PATH"
+    cp --preserve=mode,ownership,timestamps -- \
+      "${TMP_ROOT}/telegram-notifier.json" "$NOTIFIER_CONFIG_PATH"
+    systemctl restart "$NOTIFIER_NAME" >/dev/null 2>&1 || true
+    die "Telegram 通知偏好修改失败，已恢复原设置。"
+  fi
+  info "Telegram 通知偏好已保存：新网段 $(toggle_label "$TELEGRAM_CONNECTION_ALERTS")；重连 $(toggle_label "$TELEGRAM_RECONNECT_ALERTS")；日报 $(toggle_label "$TELEGRAM_DAILY_REPORTS")；月报 $(toggle_label "$TELEGRAM_MONTHLY_REPORTS")。"
+}
+
 command_telegram_logs() {
   require_root
   journalctl --no-pager -e -u "$NOTIFIER_NAME"
@@ -4061,6 +4606,11 @@ command_telegram_disable() {
   TELEGRAM_CHAT_ID=""
   TELEGRAM_STATS_PORT=""
   TELEGRAM_STATS_SECRET=""
+  TELEGRAM_RECONNECT_INTERVAL=600
+  TELEGRAM_CONNECTION_ALERTS=1
+  TELEGRAM_RECONNECT_ALERTS=0
+  TELEGRAM_DAILY_REPORTS=0
+  TELEGRAM_MONTHLY_REPORTS=0
   if ! write_config || ! save_settings; then
     warn "写入关闭配置失败，正在回滚。"
     restore_telegram_change "$TMP_ROOT" "$old_enabled"
@@ -4173,11 +4723,18 @@ command_status() {
   current_version="$(installed_version || printf '未安装')"
   printf 'hy2-safe 管理脚本版本：v%s\n' "$PROGRAM_VERSION"
   printf '当前 Hysteria 2 版本：%s\n' "$current_version"
+  if [[ "${MIMIC_ENABLED:-0}" -eq 1 ]]; then
+    printf 'Mimic（Fake TCP）：已启用（服务以 root 运行）\n'
+    command -v mimic >/dev/null 2>&1 && mimic --version || true
+  else
+    printf 'Mimic（Fake TCP）：未启用\n'
+  fi
   case "${ACME_TYPE:-http}" in
     http) printf '证书验证：HTTP-01（需要入站 TCP 80）\n' ;;
     tls) printf '证书验证：TLS-ALPN-01（需要入站 TCP 443）\n' ;;
     dns) printf '证书验证：Cloudflare DNS-01（不需要入站 TCP 80/443）\n' ;;
   esac
+  show_vps_security_firewall_status
   if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
     printf 'Hy2 服务：正在运行\n'
   else
@@ -4196,6 +4753,12 @@ command_status() {
   fi
   if [[ "${TELEGRAM_ENABLED:-0}" -eq 1 ]]; then
     printf 'Telegram 消息名称：%s\n' "$TELEGRAM_NAME"
+    printf 'Telegram 通知偏好：新网段 %s；重连 %s（%s）；日报 %s；月报 %s；证书告警开启\n' \
+      "$(toggle_label "$TELEGRAM_CONNECTION_ALERTS")" \
+      "$(toggle_label "$TELEGRAM_RECONNECT_ALERTS")" \
+      "$(telegram_reconnect_interval_label "$TELEGRAM_RECONNECT_INTERVAL")" \
+      "$(toggle_label "$TELEGRAM_DAILY_REPORTS")" \
+      "$(toggle_label "$TELEGRAM_MONTHLY_REPORTS")"
     if systemctl is-active --quiet "$NOTIFIER_NAME" 2>/dev/null; then
       printf 'Telegram 提醒：已开启并正在运行\n'
       printf 'Telegram 流量报告：每天 08:00 报告前一日；每月 1 日 08:05 报告上月（北京时间、静默消息）\n'
@@ -4212,6 +4775,67 @@ command_status() {
 command_logs() {
   require_root
   journalctl --no-pager -e -u "$SERVICE_NAME"
+}
+
+command_service() {
+  local action="${1:-menu}" choice="" acme_log_cursor
+  require_root
+  require_systemd
+  load_existing_settings || die "请先安装 Hy2。"
+  case "$action" in
+    menu)
+      [[ -t 0 ]] || die "服务控制菜单需要交互式终端。"
+      while true; do
+        printf '\n服务控制与诊断：\n'
+        menu_item "1" "查看服务、证书和防火墙状态"
+        menu_item "2" "启动 Hysteria（仅尝试一次）"
+        menu_item "3" "停止 Hysteria"
+        menu_item "4" "重启 Hysteria（停止后重新启动一次）"
+        menu_item "5" "查看最近 120 条 Hysteria 日志"
+        menu_item "0" "返回主菜单"
+        prompt_input "请输入菜单编号 [0-5]: " choice
+        case "$choice" in
+          1) command_status ;;
+          2) command_service start ;;
+          3) command_service stop ;;
+          4) command_service restart ;;
+          5) journalctl --no-pager -n 120 -u "$SERVICE_NAME" ;;
+          0) return ;;
+          *) warn "无效选项：$choice" ;;
+        esac
+      done
+      ;;
+    status)
+      command_status
+      ;;
+    start | restart)
+      preflight_vps_security_firewall
+      if [[ "$action" == "restart" ]]; then
+        warn "重启会短暂中断现有客户端连接。"
+        systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+      fi
+      systemctl reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
+      acme_log_cursor="$(service_log_cursor)"
+      if systemctl start "$SERVICE_NAME" && wait_for_service; then
+        configure_notifier_service ||
+          warn "Hysteria 已启动，但 Telegram 提醒服务未能启动；请运行 hy2-safe telegram-logs。"
+        info "Hysteria 服务运行正常。"
+        return
+      fi
+      stop_acme_retry_loop "$acme_log_cursor" || true
+      journalctl --no-pager -n 120 -u "$SERVICE_NAME" >&2 || true
+      die "Hysteria 未能启动；请先按上方日志修复问题，再运行 hy2-safe service start。"
+      ;;
+    stop)
+      if [[ -t 0 ]] && ! prompt_yes_no "确认停止 Hysteria？现有客户端会断开。" no; then
+        info "已取消。"
+        return
+      fi
+      systemctl stop "$SERVICE_NAME"
+      info "Hysteria 已停止。"
+      ;;
+    *) die "service 的未知操作：$action（可用：start、stop、restart、status）。" ;;
+  esac
 }
 
 service_user_has_processes() {
@@ -4375,9 +4999,12 @@ command_menu() {
   menu_item "10" "立即发送 Telegram 流量报告"
   menu_item "11" "设置 Telegram 消息名称"
   menu_item "12" "一键重置 Hy2 密码"
+  menu_item "13" "服务控制与诊断"
+  menu_item "14" "设置 Telegram 重连提醒频率"
+  menu_item "15" "设置 Telegram 通知偏好"
   menu_item "0" "退出"
   printf '\n'
-  prompt_input "请输入菜单编号 [0-12]: " choice
+  prompt_input "请输入菜单编号 [0-15]: " choice
   case "$choice" in
     1)
       if [[ -f "$SETTINGS_PATH" ]]; then
@@ -4425,6 +5052,18 @@ command_menu() {
       refresh_managed_runtime
       command_rotate_password
       ;;
+    13)
+      refresh_managed_runtime
+      command_service
+      ;;
+    14)
+      refresh_managed_runtime
+      command_telegram_reconnect_interval
+      ;;
+    15)
+      refresh_managed_runtime
+      command_telegram_preferences
+      ;;
     0) info "已退出。" ;;
     *) die "无效选项：$choice" ;;
   esac
@@ -4451,12 +5090,15 @@ main() {
     certificate-alert) command_certificate_alert "$@" ;;
     show-client) show_client "$@" ;;
     status) command_status "$@" ;;
+    service) command_service "$@" ;;
     version | -V | --version) command_version ;;
     logs) command_logs "$@" ;;
     telegram-setup) command_telegram_setup "$@" ;;
     telegram-test) command_telegram_test "$@" ;;
     telegram-report) command_telegram_report "$@" ;;
     telegram-name) command_telegram_name "$@" ;;
+    telegram-reconnect-interval) command_telegram_reconnect_interval "$@" ;;
+    telegram-preferences) command_telegram_preferences "$@" ;;
     telegram-logs) command_telegram_logs "$@" ;;
     telegram-disable) command_telegram_disable "$@" ;;
     telegram-replace) command_telegram_replace "$@" ;;
