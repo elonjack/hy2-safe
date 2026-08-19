@@ -533,8 +533,8 @@ stop_acme_retry_loop() {
   service_logs_show_acme_failure "$cursor" || return 1
   systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
   systemctl reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
-  warn "检测到 ACME 证书申请失败；已停止 Hysteria，避免 systemd 继续重试并消耗 Let’s Encrypt 验证次数。"
-  warn "请修复 DNS、云安全组和系统防火墙后，在“服务控制与诊断”中仅启动一次服务。若日志显示 HTTP 429，请等待其中的 retry after 时间后再启动。"
+  warn "检测到 ACME 证书申请失败；已停止 Hysteria，避免 systemd 继续重试并消耗 Let's Encrypt 验证次数。"
+  warn "请修复 DNS、云安全组和系统防火墙后，在服务控制与诊断中仅启动一次服务。若日志显示 HTTP 429，请等待其中的 retry after 时间后再启动。"
   return 0
 }
 
@@ -1081,11 +1081,11 @@ preflight_vps_security_firewall() {
   info "检测到 vps-security-bootstrap 管理的默认拒绝 nftables 防火墙，正在检查 Hy2 所需端口。"
   if [[ -n "$acme_port" ]]; then
     if ! vps_security_ports_cover "$VPS_SECURITY_TCP_PORTS_PATH" "$acme_port" "$acme_port"; then
-      die "vps-security-bootstrap 未放行 ACME 所需的 TCP ${acme_port}。请运行它的防火墙菜单，选择“追加额外 TCP 放行端口”，加入 ${acme_port}；云安全组也需要同步放行。"
+      die "vps-security-bootstrap 未放行 ACME 所需的 TCP ${acme_port}。请运行它的防火墙菜单，选择追加额外 TCP 放行端口，加入 ${acme_port}；云安全组也需要同步放行。"
     fi
   fi
   if ! vps_security_ports_cover "$VPS_SECURITY_UDP_PORTS_PATH" "$udp_start" "$udp_end"; then
-    die "vps-security-bootstrap 未完整放行 Hy2 所需的 UDP ${udp_start}-${udp_end}。请运行它的防火墙菜单，选择“追加额外 UDP 放行端口”，加入 ${udp_start}-${udp_end}；云安全组也需要同步放行。"
+    die "vps-security-bootstrap 未完整放行 Hy2 所需的 UDP ${udp_start}-${udp_end}。请运行它的防火墙菜单，选择追加额外 UDP 放行端口，加入 ${udp_start}-${udp_end}；云安全组也需要同步放行。"
   fi
   info "vps-security-bootstrap 防火墙端口检查通过。"
 }
@@ -4317,7 +4317,7 @@ command_telegram_setup() {
   fi
 
   info "Telegram 提醒已启用，消息名称为【${TELEGRAM_NAME}】，只会向 Chat ID ${TELEGRAM_CHAT_ID} 主动发送消息。"
-  printf '默认：证书告警和新 IP 网段提醒开启；重连汇总、日报和月报关闭。可在“设置 Telegram 通知偏好”中分别调整。\n'
+  printf '默认：证书告警和新 IP 网段提醒开启；重连汇总、日报和月报关闭。可在设置 Telegram 通知偏好中分别调整。\n'
 }
 
 command_telegram_replace() {
