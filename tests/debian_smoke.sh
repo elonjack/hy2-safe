@@ -7,7 +7,7 @@ export HY2_SAFE_SOURCE_ONLY=1
 # shellcheck source=../hy2-safe.sh
 source "${TEST_ROOT}/hy2-safe.sh"
 
-[[ "$PROGRAM_VERSION" == "1.1.0" ]]
+[[ "$PROGRAM_VERSION" == "1.1.1" ]]
 validate_domain "hy2.example.com"
 ! validate_domain "invalid_domain"
 validate_email "owner@example.com"
