@@ -1,5 +1,6 @@
 from pathlib import Path
 import datetime as dt
+import io
 import json
 import os
 import re
@@ -21,7 +22,7 @@ def forbid(pattern: str, message: str) -> None:
 
 
 require(r"^set -Eeuo pipefail$", "strict Bash mode is required")
-require(r'PROGRAM_VERSION="1\.0\.9"', "the release must expose its manager version")
+require(r'PROGRAM_VERSION="1\.1\.0"', "the release must expose its manager version")
 require(r"require_supported_os", "installations must be limited to Debian 12/13")
 require(r"sha256sum", "release binaries must be checksum-verified")
 require(r"release_asset_field", "release metadata must be parsed structurally")
@@ -36,7 +37,7 @@ require(r"reported_version=", "the verified binary must report its version")
 require(r'"\$reported_version" == "\$version"', "the binary version must match release metadata")
 require(r'sub\(/\^\.\*\\//, "", candidate\)', "hashes.txt build/ paths must be normalized")
 require(r"REPOSITORY=\"apernet/hysteria\"", "downloads must use the official repository")
-require(r"User=hysteria$", "the service must run as the dedicated user")
+require(r"service_identity=\$'User=hysteria\\nGroup=hysteria'", "the default service must run as the dedicated user")
 require(r"现有 hysteria 用户具有可登录 Shell", "pre-existing service users must be validated")
 require(r"hysteria 组包含额外成员", "the config-reading group must reject extra members")
 require(r'ACCOUNT_OWNERSHIP_PATH="\$\{CONFIG_DIR\}/hy2-safe-account\.env"', "account ownership must be recorded separately")
@@ -61,6 +62,14 @@ require(r'HOP_START="50000"', "the default hopping range must use the audited na
 require(r'HOP_END="50500"', "the default hopping range must contain 501 candidate ports")
 forbid(r'20000-50000', "the obsolete broad default hopping range must not return")
 require(r"ignoreClientBandwidth: true", "the server must reject client bandwidth hints")
+require(r"--mimic", "Mimic must be an explicit opt-in")
+require(r"MIMIC_ENABLED", "Mimic state must be persisted with managed settings")
+require(r'printf \'mimic:', "Mimic must be emitted in the server configuration")
+require(r'Mimic 不能与原生端口跳跃共用', "Mimic and port hopping must be mutually exclusive")
+require(r'command -v mimic', "Mimic must be present before enabling it")
+require(r'compare_versions "\$hysteria_version" "v2\.12\.0"', "Mimic requires Hysteria 2 v2.12.0 or newer")
+require(r"User=root", "Mimic service mode must grant the upstream-required root privileges")
+require(r"restore_unprivileged_acme_ownership", "disabling Mimic must restore ACME state ownership")
 require(r"bbrProfile: conservative", "server and official client output must use conservative BBR")
 if len(re.findall(r"bbrProfile: conservative", SCRIPT)) < 2:
     raise AssertionError("both server and official client output must use conservative BBR")
@@ -80,7 +89,13 @@ require(r"PartOf=hysteria-server\.service", "the notifier must restart with Hyst
 require(r"protect_content.*true", "Telegram messages must request content protection")
 require(r'"parse_mode": "HTML"', "Telegram notices must use structured HTML formatting")
 require(r'"disable_notification": "true" if silent else "false"', "scheduled reports must support silent delivery")
-require(r"HOURLY_SECONDS = 3600", "reconnect alerts must be rate-limited")
+require(r"TelegramRateLimitError", "Telegram rate limits must be distinguished from ordinary failures")
+require(r"retry_after", "Telegram retry delays must honor the API retry_after value")
+require(r"RETRY_BASE_SECONDS = 30", "Telegram retries must use bounded exponential backoff")
+require(r"service_log_cursor", "ACME failure detection must be bounded to the current service start")
+require(r"--after-cursor", "ACME failure detection must ignore stale journal entries")
+require(r"DEFAULT_RECONNECT_SUMMARY_SECONDS = 600", "reconnect summaries must default to ten minutes")
+require(r"RECONNECT_SUMMARY_INTERVALS = \{0, 300, 600, 1800, 3600\}", "reconnect summary choices must be explicitly bounded")
 require(r"TRAFFIC_SAMPLE_SECONDS = 60", "traffic sampling must remain lightweight")
 require(r'stats_json\(config, "/traffic"\)', "reports must use Hysteria's official local traffic API")
 forbid(r"/traffic\?clear=1", "traffic reporting must not clear official counters")
@@ -93,6 +108,10 @@ require(r"REPORT_HOUR = 8", "daily reports must use the documented Beijing sched
 require(r"MONTHLY_REPORT_MINUTE = 5", "monthly reports must follow the daily report")
 require(r"telegram-report\) command_telegram_report", "manual traffic reports need a direct command")
 require(r"telegram-name\) command_telegram_name", "Telegram instance names need a direct command")
+require(r"telegram-preferences\) command_telegram_preferences", "notification preferences need a direct command")
+require(r"TELEGRAM_CONNECTION_ALERTS", "Telegram connection-alert preferences must persist")
+require(r'"connection_alerts": connection_alerts', "notifier credentials must store connection-alert preferences")
+require(r'"daily_reports": daily_reports', "notifier credentials must store report preferences")
 require(r'"display_name": display_name', "the notifier credential must store the instance name")
 require(r"instance_line\(config\)", "every report family must expose the instance name")
 require(r"设置 Telegram 消息名称", "the menu must expose instance-name management")
@@ -149,6 +168,16 @@ require(r"DNS-01 不需要入站 TCP 端口", "DNS-01 must skip inbound ACME por
 require(r'CLOUDFLARE_API_TOKEN=""', "leaving DNS-01 must remove the retained token")
 require(r"preflight_domain", "install and configure must preflight public DNS")
 require(r"preflight_ports", "install and configure must preflight TCP/UDP conflicts")
+require(r'VPS_SECURITY_TCP_PORTS_PATH="\$\{VPS_SECURITY_CONF_DIR\}/firewall-tcp-ports"', "vps-security-bootstrap TCP state must be read from its documented path")
+require(r'VPS_SECURITY_UDP_PORTS_PATH="\$\{VPS_SECURITY_CONF_DIR\}/firewall-udp-ports"', "vps-security-bootstrap UDP state must be read from its documented path")
+require(r"vps_security_firewall_is_active", "the optional vps-security-bootstrap integration must detect its loaded table")
+require(r"vps_security_ports_cover", "the optional firewall integration must verify complete port ranges")
+require(r"preflight_vps_security_firewall", "install, configuration, and Telegram changes must preflight the managed firewall")
+require(r"stop_acme_retry_loop", "ACME failures must stop retrying before they consume more authorizations")
+require(r"StartLimitIntervalSec=1h", "the Hysteria unit must bound repeated failures")
+require(r"StartLimitBurst=3", "the Hysteria unit must bound repeated failures")
+require(r"RestartSec=30s", "the Hysteria unit must not retry certificate failures rapidly")
+require(r"command_service", "the manager must expose controlled service recovery")
 require(r"ss -H -lnt", "ACME TCP conflicts must be detected before changes")
 require(r"ss -H -lun", "Hy2 UDP conflicts must be detected before changes")
 require(r"OnCalendar=\*-\*-\* 09:00", "certificate health must be checked daily")
@@ -254,7 +283,7 @@ parse_remote_ip = namespace["parse_remote_ip"]
 hidden_ip_group = namespace["hidden_ip_group"]
 extract_connection = namespace["extract_connection"]
 process_connection = namespace["process_connection"]
-queue_hourly_summaries = namespace["queue_hourly_summaries"]
+queue_reconnect_summaries = namespace["queue_reconnect_summaries"]
 default_state = namespace["default_state"]
 normalize_state = namespace["normalize_state"]
 counter_delta = namespace["counter_delta"]
@@ -266,6 +295,10 @@ aggregate_days = namespace["aggregate_days"]
 records_for_month = namespace["records_for_month"]
 format_bytes = namespace["format_bytes"]
 send_message = namespace["send_message"]
+queue_message = namespace["queue_message"]
+flush_outbox = namespace["flush_outbox"]
+TelegramRateLimitError = namespace["TelegramRateLimitError"]
+telegram_call = namespace["telegram_call"]
 drain_journal = namespace["drain_journal"]
 hy2_traffic_totals = namespace["hy2_traffic_totals"]
 network_counters = namespace["network_counters"]
@@ -310,6 +343,15 @@ namespace["config_path"] = LegacyConfigPath()
 legacy_config = namespace["load_config"]()
 if legacy_config["display_name"] != "Hy2 节点":
     raise AssertionError("v1.0.5 Telegram credentials must receive a safe default name")
+if legacy_config["reconnect_summary_seconds"] != 600:
+    raise AssertionError("legacy Telegram credentials must receive a ten-minute reconnect summary default")
+if (
+    not legacy_config["connection_alerts"]
+    or legacy_config["reconnect_alerts"]
+    or legacy_config["daily_reports"]
+    or legacy_config["monthly_reports"]
+):
+    raise AssertionError("legacy Telegram credentials must receive the low-noise defaults")
 
 v4_key, v4_label = hidden_ip_group(parse_remote_ip("123.45.67.89:443"))
 if (v4_key, v4_label) != ("v4:123.45.67.0/24", "123.45.67.*"):
@@ -358,20 +400,59 @@ if trailing_ansi_event is None or trailing_ansi_event[0] != "123.45.67.89:4567":
     raise AssertionError("trailing ANSI data must not hide successful connections")
 
 state = default_state()
-config = {"display_name": "洛杉矶 01"}
+config = {
+    "display_name": "洛杉矶 01",
+    "reconnect_summary_seconds": 600,
+    "connection_alerts": True,
+    "reconnect_alerts": True,
+    "daily_reports": True,
+    "monthly_reports": True,
+}
 process_connection(state, config, "123.45.67.89:4567", 1000.0)
 process_connection(state, config, "123.45.67.90:5678", 1010.0)
 group = state["groups"]["v4:123.45.67.0/24"]
 if group["pending_reconnects"] != 1 or len(state["groups"]) != 1:
     raise AssertionError("same-/24 reconnects must be grouped")
-queue_hourly_summaries(state, config, 4611.0)
+queue_reconnect_summaries(state, config, 1011.0)
 if group["pending_reconnects"] != 0:
-    raise AssertionError("hourly summaries must consume grouped reconnect counts")
-if "hourly:v4:123.45.67.0/24" not in state["outbox"]:
-    raise AssertionError("an hourly reconnect summary must be queued")
+    raise AssertionError("the first reconnect must be sent immediately")
+if "reconnect-summary:v4:123.45.67.0/24" not in state["outbox"]:
+    raise AssertionError("an immediate first reconnect notice must be queued")
+process_connection(state, config, "123.45.67.91:6789", 1020.0)
+queue_reconnect_summaries(state, config, 1610.0)
+if group["pending_reconnects"] != 1:
+    raise AssertionError("reconnects inside the ten-minute window must stay grouped")
+queue_reconnect_summaries(state, config, 1611.0)
+if group["pending_reconnects"] != 0:
+    raise AssertionError("the ten-minute summary must consume grouped reconnects")
 process_connection(state, config, "123.45.67.91:6789", 100000.0)
 if "returned:v4:123.45.67.0/24" not in state["outbox"]:
     raise AssertionError("a /24 returning after 24 hours must alert again")
+
+immediate_state = default_state()
+immediate_config = {
+    "display_name": "东京 01",
+    "reconnect_summary_seconds": 0,
+    "connection_alerts": True,
+    "reconnect_alerts": True,
+}
+process_connection(immediate_state, immediate_config, "198.51.100.7:4567", 1000.0)
+process_connection(immediate_state, immediate_config, "198.51.100.8:5678", 1010.0)
+immediate_group = immediate_state["groups"]["v4:198.51.100.0/24"]
+if immediate_group["pending_reconnects"] or "reconnect:v4:198.51.100.0/24" not in immediate_state["outbox"]:
+    raise AssertionError("the immediate reconnect mode must not queue or delay reconnect notices")
+
+quiet_state = default_state()
+quiet_config = {
+    "display_name": "安静节点",
+    "reconnect_summary_seconds": 600,
+    "connection_alerts": False,
+    "reconnect_alerts": False,
+}
+process_connection(quiet_state, quiet_config, "203.0.113.7:4567", 1000.0)
+process_connection(quiet_state, quiet_config, "203.0.113.8:5678", 1010.0)
+if quiet_state["outbox"] or quiet_state["groups"]["v4:203.0.113.0/24"]["pending_reconnects"]:
+    raise AssertionError("disabled connection and reconnect notices must stay silent")
 
 escaped_state = default_state()
 escaped_config = {"display_name": "东京 <主机&01>"}
@@ -425,6 +506,38 @@ if (
     or telegram_fields.get("protect_content") != "true"
 ):
     raise AssertionError("formatted silent Telegram reports must stay protected")
+
+retry_state = default_state(1000.0)
+queue_message(retry_state, "retry-test", "message", 1000.0)
+namespace["send_message"] = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+    TelegramRateLimitError(71)
+)
+namespace["atomic_write_json"] = lambda *_args, **_kwargs: None
+namespace["log"] = lambda *_args, **_kwargs: None
+retry_started = namespace["time"].time()
+retry_at = flush_outbox(retry_state, {}, 0.0)
+if (
+    retry_at - retry_started < 70.0
+    or retry_state["outbox"]["retry-test"].get("attempts") != 1
+):
+    raise AssertionError("Telegram 429 retries must honor retry_after and persist attempts")
+
+original_urlopen = namespace["urllib"].request.urlopen
+namespace["urllib"].request.urlopen = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+    namespace["urllib"].error.HTTPError(
+        "https://api.telegram.org/", 429, "Too Many Requests", {},
+        io.BytesIO(b'{"parameters":{"retry_after":71}}'),
+    )
+)
+try:
+    telegram_call({"token": "not-a-real-token"}, "sendMessage", {})
+except TelegramRateLimitError as exc:
+    if exc.retry_after != 71:
+        raise AssertionError("Telegram 429 retry_after must be parsed exactly")
+else:
+    raise AssertionError("Telegram 429 must raise a dedicated retryable error")
+finally:
+    namespace["urllib"].request.urlopen = original_urlopen
 
 namespace["stats_json"] = lambda _config, path: (
     {
@@ -550,8 +663,10 @@ if README.count("```") % 2:
     raise AssertionError("README fenced code blocks must be balanced")
 if "[!IMPORTANT]" not in README or "[!WARNING]" not in README:
     raise AssertionError("README must make the main safety warnings prominent")
-if "hy2-safe v1.0.9 · Hysteria 2 管理菜单" not in README:
+if "hy2-safe v1.1.0 · Hysteria 2 管理菜单" not in README:
     raise AssertionError("README menu version must match the release")
+if "vps-security-bootstrap" not in README or "服务控制与诊断" not in README:
+    raise AssertionError("README must explain firewall integration and controlled recovery")
 if "/etc/hysteria/hy2-safe-account.env" not in README:
     raise AssertionError("README must explain the account ownership record")
 if "密码状态必须是 `L`" not in README:
