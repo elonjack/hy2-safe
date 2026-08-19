@@ -15,13 +15,17 @@ IFS=$'\n\t'
 umask 077
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.1.0"
+readonly PROGRAM_VERSION="1.1.1"
 readonly REPOSITORY="apernet/hysteria"
 readonly API_URL="https://api.github.com/repos/${REPOSITORY}/releases/latest"
 readonly RELEASE_URL="https://github.com/${REPOSITORY}/releases/download"
+readonly MANAGER_REPOSITORY="elonjack/hy2-safe"
+readonly MANAGER_API_URL="https://api.github.com/repos/${MANAGER_REPOSITORY}/releases/latest"
+readonly MANAGER_RELEASE_URL="https://github.com/${MANAGER_REPOSITORY}/releases/download"
 readonly BIN_PATH="/usr/local/bin/hysteria"
 readonly PREVIOUS_BIN_PATH="/usr/local/bin/hysteria.previous"
 readonly MANAGER_PATH="/usr/local/sbin/hy2-safe"
+readonly PREVIOUS_MANAGER_PATH="/usr/local/sbin/hy2-safe.previous"
 readonly DEFAULT_DOWNLOAD_PATH="/root/hy2-safe.sh"
 readonly CONFIG_DIR="/etc/hysteria"
 readonly CONFIG_PATH="${CONFIG_DIR}/config.yaml"
@@ -169,6 +173,7 @@ usage() {
   ./hy2-safe.sh install [选项]
   hy2-safe configure [选项]
   hy2-safe update [--quiet]
+  hy2-safe manager-update
   hy2-safe rotate-password
   hy2-safe certificate-check [--quiet]
   hy2-safe show-client
@@ -392,6 +397,93 @@ elif isinstance(value, (str, int)) and not isinstance(value, bool):
 else:
     raise SystemExit("release asset field has an unexpected type")
 PY
+}
+
+manager_latest_version() {
+  local metadata="$1"
+  curl_secure \
+    --max-filesize 1048576 \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "$MANAGER_API_URL" \
+    --output "$metadata"
+  python3 - "$metadata" <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    release = json.load(handle)
+tag = release.get("tag_name", "")
+if release.get("draft") or release.get("prerelease"):
+    raise SystemExit("latest manager release is not stable")
+if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag):
+    raise SystemExit("invalid manager release tag")
+print(tag)
+PY
+}
+
+fetch_verified_manager_release() {
+  local metadata version relation script_url checksum_url script_digest checksum_digest
+  local script_size checksum_size script_actual checksum_actual reported_version
+  TMP_ROOT="$(mktemp -d /tmp/hy2-safe.XXXXXXXX)"
+  metadata="${TMP_ROOT}/manager-release.json"
+  version="$(manager_latest_version "$metadata")" ||
+    die "无法从 hy2-safe GitHub Release API 解析最新稳定版。"
+  relation="$(compare_versions "$version" "v${PROGRAM_VERSION}")" ||
+    die "无法比较 hy2-safe 管理脚本版本。"
+  [[ "$relation" -ge 0 ]] ||
+    die "GitHub Release ${version} 低于当前管理脚本 v${PROGRAM_VERSION}，拒绝降级。"
+  if [[ "$relation" -eq 0 ]]; then
+    FETCHED_MANAGER_VERSION="$version"
+    FETCHED_MANAGER_SCRIPT=""
+    return 0
+  fi
+
+  script_url="$(release_asset_field "$metadata" hy2-safe.sh browser_download_url)" ||
+    die "hy2-safe Release 中未找到唯一的 hy2-safe.sh。"
+  checksum_url="$(release_asset_field "$metadata" hy2-safe.sh.sha256 browser_download_url)" ||
+    die "hy2-safe Release 中未找到唯一的 hy2-safe.sh.sha256。"
+  script_digest="$(release_asset_field "$metadata" hy2-safe.sh digest)" ||
+    die "无法读取 hy2-safe.sh 的 GitHub Asset 摘要。"
+  checksum_digest="$(release_asset_field "$metadata" hy2-safe.sh.sha256 digest)" ||
+    die "无法读取 hy2-safe.sh.sha256 的 GitHub Asset 摘要。"
+  script_size="$(release_asset_field "$metadata" hy2-safe.sh size)" ||
+    die "无法读取 hy2-safe.sh 的 GitHub Asset 大小。"
+  checksum_size="$(release_asset_field "$metadata" hy2-safe.sh.sha256 size)" ||
+    die "无法读取 hy2-safe.sh.sha256 的 GitHub Asset 大小。"
+  [[ "$script_url" == "${MANAGER_RELEASE_URL}/${version}/hy2-safe.sh" ]] ||
+    die "hy2-safe API 返回了异常的脚本下载地址，拒绝继续。"
+  [[ "$checksum_url" == "${MANAGER_RELEASE_URL}/${version}/hy2-safe.sh.sha256" ]] ||
+    die "hy2-safe API 返回了异常的校验文件下载地址，拒绝继续。"
+  [[ "$script_size" =~ ^[1-9][0-9]{0,6}$ && "$script_size" -le 2097152 ]] ||
+    die "hy2-safe 脚本大小异常，拒绝继续。"
+  [[ "$checksum_size" =~ ^[1-9][0-9]{0,4}$ && "$checksum_size" -le 4096 ]] ||
+    die "hy2-safe 校验文件大小异常，拒绝继续。"
+  curl_secure --max-filesize 2097152 "$script_url" --output "${TMP_ROOT}/hy2-safe.sh"
+  curl_secure --max-filesize 4096 "$checksum_url" --output "${TMP_ROOT}/hy2-safe.sh.sha256"
+  [[ "$(stat -c '%s' -- "${TMP_ROOT}/hy2-safe.sh")" == "$script_size" ]] ||
+    die "hy2-safe 脚本大小与 Release 元数据不一致。"
+  [[ "$(stat -c '%s' -- "${TMP_ROOT}/hy2-safe.sh.sha256")" == "$checksum_size" ]] ||
+    die "hy2-safe 校验文件大小与 Release 元数据不一致。"
+  script_actual="$(sha256sum "${TMP_ROOT}/hy2-safe.sh" | awk '{print $1}')"
+  checksum_actual="$(sha256sum "${TMP_ROOT}/hy2-safe.sh.sha256" | awk '{print $1}')"
+  [[ "$script_digest" =~ ^sha256:([0-9a-fA-F]{64})$ ]] ||
+    die "hy2-safe 脚本 GitHub Asset SHA-256 摘要格式异常。"
+  [[ "${script_actual,,}" == "${BASH_REMATCH[1],,}" ]] ||
+    die "hy2-safe 脚本 GitHub Asset SHA-256 校验失败。"
+  [[ "$checksum_digest" =~ ^sha256:([0-9a-fA-F]{64})$ ]] ||
+    die "hy2-safe 校验文件 GitHub Asset SHA-256 摘要格式异常。"
+  [[ "${checksum_actual,,}" == "${BASH_REMATCH[1],,}" ]] ||
+    die "hy2-safe 校验文件 GitHub Asset SHA-256 校验失败。"
+  (cd "$TMP_ROOT" && sha256sum -c hy2-safe.sh.sha256) >/dev/null ||
+    die "hy2-safe Release 内置 SHA-256 校验失败。"
+  bash -n "${TMP_ROOT}/hy2-safe.sh" || die "下载的 hy2-safe 脚本语法无效。"
+  reported_version="$(sed -n 's/^readonly PROGRAM_VERSION="\([0-9][0-9.]*\)"$/\1/p' "${TMP_ROOT}/hy2-safe.sh" | head -n 1)"
+  [[ "$reported_version" == "${version#v}" ]] ||
+    die "下载脚本版本 ${reported_version:-未知} 与 Release ${version} 不一致。"
+  FETCHED_MANAGER_VERSION="$version"
+  FETCHED_MANAGER_SCRIPT="${TMP_ROOT}/hy2-safe.sh"
 }
 
 fetch_verified_release() {
@@ -1671,11 +1763,23 @@ write_config() {
 }
 
 install_manager_copy() {
-  local source_path
+  local source_path source_version manager_version relation
   source_path="$(readlink -f "$0")"
-  if [[ "$source_path" != "$MANAGER_PATH" ]]; then
-    install -m 0755 -o root -g root "$source_path" "$MANAGER_PATH"
+  [[ "$source_path" == "$MANAGER_PATH" ]] && return
+  source_version="$(sed -n 's/^readonly PROGRAM_VERSION="\([0-9][0-9.]*\)"$/\1/p' "$source_path" | head -n 1)"
+  if [[ -f "$MANAGER_PATH" && ! -L "$MANAGER_PATH" ]]; then
+    manager_version="$(sed -n 's/^readonly PROGRAM_VERSION="\([0-9][0-9.]*\)"$/\1/p' "$MANAGER_PATH" | head -n 1)"
+    if [[ "$source_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$manager_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      relation="$(compare_versions "v${source_version}" "v${manager_version}")" ||
+        die "无法比较管理脚本版本。"
+      if [[ "$relation" -lt 0 ]]; then
+        warn "当前入口 v${source_version} 旧于已安装的管理脚本 v${manager_version}，不会覆盖新版。"
+        return
+      fi
+      [[ "$relation" -eq 0 ]] && return
+    fi
   fi
+  install -m 0755 -o root -g root "$source_path" "$MANAGER_PATH"
 }
 
 write_notifier_script() {
@@ -4664,6 +4768,54 @@ command_update() {
   fi
 }
 
+command_sync_runtime() {
+  require_root
+  require_systemd
+  load_existing_settings || die "请先安装 Hy2。"
+  exec 9>"$LOCK_PATH"
+  flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  install_manager_copy
+  ensure_service_user_and_directories
+  write_systemd_units
+  configure_update_timer
+  configure_health_timer
+  if [[ "$TELEGRAM_ENABLED" -eq 1 ]]; then
+    configure_notifier_service ||
+      die "新版 Telegram 提醒运行时同步失败；请运行 hy2-safe telegram-logs。"
+  fi
+  info "hy2-safe 管理脚本与提醒运行时已同步；Hy2 服务未重启。"
+}
+
+command_manager_update() {
+  require_root
+  require_systemd
+  case "${1:-}" in
+    "") ;;
+    -h|--help)
+      usage
+      return
+      ;;
+    *) die "manager-update 不接受选项：$1" ;;
+  esac
+  [[ -f "$SETTINGS_PATH" ]] || die "请先安装 Hy2。"
+  validate_root_secret_file "$SETTINGS_PATH" "hy2-safe 设置文件"
+  exec 9>"$LOCK_PATH"
+  flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  fetch_verified_manager_release
+  if [[ -z "$FETCHED_MANAGER_SCRIPT" ]]; then
+    info "当前已是最新 hy2-safe 管理脚本 v${PROGRAM_VERSION}。"
+    return
+  fi
+  if [[ -f "$MANAGER_PATH" && ! -L "$MANAGER_PATH" ]]; then
+    cp --preserve=mode,ownership,timestamps -- "$MANAGER_PATH" "$PREVIOUS_MANAGER_PATH"
+  fi
+  install -m 0755 -o root -g root "$FETCHED_MANAGER_SCRIPT" "${MANAGER_PATH}.new"
+  mv -f -- "${MANAGER_PATH}.new" "$MANAGER_PATH"
+  info "hy2-safe 管理脚本已更新到 ${FETCHED_MANAGER_VERSION}，正在同步提醒运行时。"
+  flock -u 9
+  "$MANAGER_PATH" sync-runtime
+}
+
 command_rotate_password() {
   local answer="" old_password
   require_root
@@ -5002,9 +5154,10 @@ command_menu() {
   menu_item "13" "服务控制与诊断"
   menu_item "14" "设置 Telegram 重连提醒频率"
   menu_item "15" "设置 Telegram 通知偏好"
+  menu_item "16" "更新 hy2-safe 管理脚本并同步提醒"
   menu_item "0" "退出"
   printf '\n'
-  prompt_input "请输入菜单编号 [0-15]: " choice
+  prompt_input "请输入菜单编号 [0-16]: " choice
   case "$choice" in
     1)
       if [[ -f "$SETTINGS_PATH" ]]; then
@@ -5064,13 +5217,27 @@ command_menu() {
       refresh_managed_runtime
       command_telegram_preferences
       ;;
+    16) command_manager_update ;;
     0) info "已退出。" ;;
     *) die "无效选项：$choice" ;;
   esac
 }
 
 main() {
-  local command
+  local command source_path source_version manager_version relation
+  source_path="$(readlink -f "$0")"
+  if [[ "$source_path" != "$MANAGER_PATH" && -f "$MANAGER_PATH" && ! -L "$MANAGER_PATH" ]]; then
+    source_version="$(sed -n 's/^readonly PROGRAM_VERSION="\([0-9][0-9.]*\)"$/\1/p' "$source_path" | head -n 1)"
+    manager_version="$(sed -n 's/^readonly PROGRAM_VERSION="\([0-9][0-9.]*\)"$/\1/p' "$MANAGER_PATH" | head -n 1)"
+    if [[ "$source_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$manager_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      relation="$(compare_versions "v${source_version}" "v${manager_version}")" ||
+        die "无法比较管理脚本版本。"
+      if [[ "$relation" -lt 0 ]]; then
+        info "检测到已安装的较新管理脚本 v${manager_version}，正在转交执行。"
+        exec "$MANAGER_PATH" "$@"
+      fi
+    fi
+  fi
   if [[ "$#" -eq 0 ]]; then
     if [[ -t 0 && -t 1 ]]; then
       command_menu
@@ -5085,6 +5252,8 @@ main() {
     install) command_install "$@" ;;
     configure) command_configure "$@" ;;
     update) command_update "$@" ;;
+    manager-update) command_manager_update "$@" ;;
+    sync-runtime) command_sync_runtime "$@" ;;
     rotate-password) command_rotate_password "$@" ;;
     certificate-check) command_certificate_check "$@" ;;
     certificate-alert) command_certificate_alert "$@" ;;

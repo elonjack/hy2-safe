@@ -132,10 +132,10 @@ VPS 系统防火墙和云厂商安全组是两层不同的过滤：
 以 `root` 登录 VPS，复制下面一整行：
 
 ```bash
-apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.0/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.0/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
+apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.1/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.1/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
 ```
 
-这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.1.0` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
+这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.1.1` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
 
 如果想先查看：
 
@@ -194,7 +194,7 @@ hy2-safe
 菜单如下：
 
 ```text
-hy2-safe v1.1.0 · Hysteria 2 管理菜单
+hy2-safe v1.1.1 · Hysteria 2 管理菜单
 
   1) 安装 Hy2
   2) 完整卸载 Hy2
@@ -211,6 +211,7 @@ hy2-safe v1.1.0 · Hysteria 2 管理菜单
   13) 服务控制与诊断
   14) 设置 Telegram 重连提醒频率
   15) 设置 Telegram 通知偏好
+  16) 更新 hy2-safe 管理脚本并同步提醒
   0) 退出
 ```
 
@@ -243,6 +244,20 @@ hy2-safe service restart
 ```
 
 `restart` 会先停止服务、清除旧的 systemd 失败状态，再只启动一次；适用于修好 DNS、防火墙或安全组后的恢复。停止或重启会断开当前客户端连接。
+
+## 管理脚本一键更新
+
+菜单 `16) 更新 hy2-safe 管理脚本并同步提醒`，或运行以下命令：
+
+```bash
+hy2-safe manager-update
+```
+
+它会从本仓库的最新稳定 Release 读取版本，拒绝草稿、预发布和降级；随后校验固定下载地址、GitHub Asset SHA-256、Release 内置 SHA-256、文件大小和脚本版本，才原子替换管理脚本。旧版会备份到 `/usr/local/sbin/hy2-safe.previous`。最后会同步 Telegram 提醒程序、权限与 systemd 单元，但**不会重启 Hy2 服务**。
+
+`hy2-safe update` 仍然只更新 Hysteria 官方核心；这两个更新互不混淆。
+
+早于 `v1.1.1` 的旧管理脚本没有这个菜单选项，因此只需按上面的“一键安装”下载命令手动升级一次。此后可一直通过菜单 `16` 完成管理脚本更新。
 
 Hysteria 因 ACME 证书申请失败时，脚本会停止服务并清除失败重试状态，避免 systemd 反复申请证书；不会把“端口未放行”误报为 Telegram 配置错误。遇到 Let’s Encrypt `HTTP 429` 时，请以日志中的 `retry after` 为准，先修好端口和 DNS，等到该时间后再运行一次 `hy2-safe service start`。服务单元本身也限制为一小时最多三次失败重启、每次间隔 30 秒，避免独立启动时形成快速重试。
 
@@ -708,7 +723,7 @@ hy2-safe certificate-check
 ```
 
 > [!NOTE]
-> 自动更新只更新 Hysteria 官方核心，不会远程替换 `hy2-safe` 管理脚本。重新执行 README 的一行下载命令并打开菜单，执行普通管理操作时会同步最新管理脚本、服务账号权限和 systemd 单元；刷新本身不会主动重启正在运行的 Hy2。若恰好同时触发 Hysteria 核心更新，更新流程仍会按设计重启并检查服务。选择“完整卸载”时不会先做刷新。
+> 自动更新只更新 Hysteria 官方核心，不会远程替换 `hy2-safe` 管理脚本。管理脚本请使用菜单 `16` 或 `hy2-safe manager-update` 更新；同步过程不会主动重启正在运行的 Hy2。若恰好同时触发 Hysteria 核心更新，更新流程仍会按设计重启并检查服务。
 
 ## hysteria 服务账号是什么
 
@@ -878,6 +893,9 @@ hy2-safe configure
 
 # 立即检查 Hysteria 官方稳定版
 hy2-safe update
+
+# 一键更新管理脚本和 Telegram 提醒运行时（不重启 Hy2）
+hy2-safe manager-update
 
 # 自动生成新密码、回滚保护并立即显示新客户端配置
 hy2-safe rotate-password
@@ -1068,6 +1086,6 @@ hy2-safe rotate-password
 
 ## 版本
 
-当前正式版本：`v1.1.0`
+当前正式版本：`v1.1.1`
 
 Release 页面：[elonjack/hy2-safe/releases](https://github.com/elonjack/hy2-safe/releases)
