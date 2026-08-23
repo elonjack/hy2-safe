@@ -15,7 +15,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.1.6"
+readonly PROGRAM_VERSION="1.1.7"
 # Hysteria's official GitHub organization was renamed from apernet to
 # HyNetworks. Keep this canonical owner in sync with the URL checks below:
 # those checks deliberately fail closed if GitHub Release metadata points to
@@ -5226,12 +5226,12 @@ command_menu() {
   menu_item "5" "删除 Telegram 通知"
   menu_item "6" "显示客户端配置"
   menu_item "7" "修改 Hy2 配置"
-  menu_item "8" "立即更新 Hysteria 2 核心（不更新管理脚本）"
-  menu_item "9" "查看 Hy2 版本、服务、证书和自动更新状态"
+  menu_item "8" "立即检查 Hy2 更新（默认另有每周自动更新）"
+  menu_item "9" "查看 Hy2 版本、服务和自动更新状态"
   menu_item "10" "立即发送 Telegram 流量报告"
   menu_item "11" "设置 Telegram 消息名称"
   menu_item "12" "一键重置 Hy2 密码"
-  menu_item "13" "服务控制与诊断（启动/停止/重启/日志）"
+  menu_item "13" "Hy2 服务控制与诊断"
   menu_item "14" "设置 Telegram 重连提醒频率"
   menu_item "15" "设置 Telegram 通知偏好"
   menu_item "16" "更新 hy2-safe 管理脚本并同步提醒"
