@@ -132,10 +132,10 @@ VPS 系统防火墙和云厂商安全组是两层不同的过滤：
 以 `root` 登录 VPS，复制下面一整行：
 
 ```bash
-apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.7/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.7/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
+apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.8/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.8/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
 ```
 
-这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.1.7` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
+这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.1.8` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
 
 > [!IMPORTANT]
 > ### 旧版管理脚本的一次性引导升级
@@ -147,7 +147,7 @@ apt-get update && apt-get install -y --no-install-recommends ca-certificates cur
 > - 需要把手动下载的新版脚本写入正式管理路径 `/usr/local/sbin/hy2-safe`。
 >
 > ```bash
-> apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.7/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.7/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh manager-update
+> apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.8/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.8/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh manager-update
 > ```
 >
 > 该命令会先验证下载的脚本，再更新管理脚本；即使当前尚未安装 Hy2，也不会创建 Hy2 服务、定时器或配置。完成这一次后，以后直接通过菜单 `16` 即可。
@@ -209,7 +209,7 @@ hy2-safe
 菜单如下：
 
 ```text
-hy2-safe v1.1.7 · Hysteria 2 管理菜单
+hy2-safe v1.1.8 · Hysteria 2 管理菜单
 
   1) 安装 Hy2
   2) 完整卸载 Hy2
@@ -532,6 +532,12 @@ hy2-safe configure --acme-type http --non-interactive
 - `hy2-v6.example.com`：只设置 `AAAA`。
 
 两个不同域名通常分别申请证书，或者放进同一张包含两个域名的证书。本脚本默认使用一个域名和一张证书。
+
+### 仅 IPv6 公网 VPS
+
+脚本支持没有公网 IPv4、只有公网 IPv6 的 Debian 12/13 VPS。为 Hy2 域名只设置正确的 `AAAA` 记录并保持灰云；默认 HTTP-01 必须能从 IPv6 公网访问 TCP `80`，Hy2 默认端口跳跃范围则必须能从 IPv6 公网访问 UDP `50000-50500`。客户端所在网络也必须具备可用 IPv6；只有 IPv4 的客户端不能直连仅有 `AAAA` 的节点。
+
+端口跳跃需要 Hy2 创建临时 UDP 重定向规则。脚本会使用 `nft`；若改用旧的 iptables 后端，则必须同时存在 `iptables` 和 `ip6tables`，避免 IPv6 规则缺失。系统完全没有这类命令时，脚本会安装 `nftables`。这类重定向规则不等于启用“默认拒绝入站”的防火墙：不使用 `vps-security-bootstrap` 也可以运行 Hy2，但长期使用的 VPS 仍建议另行设置最小放行策略。
 
 ## 伪装页面
 
@@ -1029,10 +1035,11 @@ hy2-safe install --reinstall
 ```bash
 command -v nft
 command -v iptables
+command -v ip6tables
 hy2-safe logs
 ```
 
-端口范围模式需要 nftables 或 iptables，并需要服务拥有 `CAP_NET_ADMIN`。脚本只在端口范围模式下授予该能力。
+端口范围模式需要 `nftables`，或同时需要 `iptables` 和 `ip6tables`，并需要服务拥有 `CAP_NET_ADMIN`。脚本只在端口范围模式下授予该能力。
 
 ### Telegram 没有消息
 

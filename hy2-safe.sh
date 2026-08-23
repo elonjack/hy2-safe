@@ -15,7 +15,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.1.7"
+readonly PROGRAM_VERSION="1.1.8"
 # Hysteria's official GitHub organization was renamed from apernet to
 # HyNetworks. Keep this canonical owner in sync with the URL checks below:
 # those checks deliberately fail closed if GitHub Release metadata points to
@@ -299,22 +299,24 @@ install_dependencies() {
   done
 }
 
+port_hopping_backend_available() {
+  command -v nft >/dev/null 2>&1 && return 0
+  command -v iptables >/dev/null 2>&1 &&
+    command -v ip6tables >/dev/null 2>&1
+}
+
 ensure_port_hopping_backend() {
   [[ "$PORT_MODE" == "range" ]] || return
-  if command -v nft >/dev/null 2>&1 ||
-    command -v iptables >/dev/null 2>&1; then
-    return
-  fi
+  port_hopping_backend_available && return
 
-  info "端口跳跃需要 nftables 或 iptables；正在安装 nftables 命令。"
+  info "端口跳跃需要 nftables，或同时需要 iptables 和 ip6tables；正在安装 nftables 命令。"
   command -v apt-get >/dev/null 2>&1 || die "Debian 系统中未找到 apt-get。"
   apt-get -o DPkg::Lock::Timeout=60 update
   DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y \
     --no-install-recommends nftables
 
-  command -v nft >/dev/null 2>&1 ||
-    command -v iptables >/dev/null 2>&1 ||
-    die "安装后仍未找到 nftables 或 iptables。"
+  port_hopping_backend_available ||
+    die "安装后仍未找到 nftables，或完整的 iptables/ip6tables 后端。"
 }
 
 detect_architecture() {

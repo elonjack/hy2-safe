@@ -22,7 +22,7 @@ def forbid(pattern: str, message: str) -> None:
 
 
 require(r"^set -Eeuo pipefail$", "strict Bash mode is required")
-require(r'PROGRAM_VERSION="1\.1\.7"', "the release must expose its manager version")
+require(r'PROGRAM_VERSION="1\.1\.8"', "the release must expose its manager version")
 require(r"command_manager_update", "the manager must expose a self-update command")
 require(r"当前尚未安装 Hy2；管理脚本已更新", "manager updates must work before the first Hy2 install")
 require(r'\[\[ "\$relation" -eq 0 && "\$source_path" == "\$MANAGER_PATH" \]\]', "external manager launchers must still fetch a verified release")
@@ -77,6 +77,16 @@ require(r'validate_root_secret_file "\$SETTINGS_PATH"', "managed settings must b
 require(r'service_capabilities="CAP_NET_BIND_SERVICE"', "low-port capability is required")
 require(r'service_capabilities\+=" CAP_NET_ADMIN"', "port hopping must add NET_ADMIN only conditionally")
 require(r'service_address_families\+=" AF_NETLINK"', "port hopping must allow nftables netlink only conditionally")
+port_hopping_backend_function = re.search(
+    r"port_hopping_backend_available\(\) \{(.*?)\n\}", SCRIPT, re.DOTALL
+)
+if port_hopping_backend_function is None:
+    raise AssertionError("port hopping must validate its firewall backend")
+port_hopping_backend = port_hopping_backend_function.group(1)
+if "command -v nft" not in port_hopping_backend:
+    raise AssertionError("nftables must remain a supported port-hopping backend")
+if "command -v iptables" not in port_hopping_backend or "command -v ip6tables" not in port_hopping_backend:
+    raise AssertionError("the iptables port-hopping backend must include IPv6 support")
 require(r'listen: ":%s-%s"', "native server-side port ranges must be supported")
 require(r'HOP_START="50000"', "the default hopping range must use the audited narrow start port")
 require(r'HOP_END="50500"', "the default hopping range must contain 501 candidate ports")
@@ -686,7 +696,7 @@ if README.count("```") % 2:
     raise AssertionError("README fenced code blocks must be balanced")
 if "[!IMPORTANT]" not in README or "[!WARNING]" not in README:
     raise AssertionError("README must make the main safety warnings prominent")
-if "hy2-safe v1.1.7 · Hysteria 2 管理菜单" not in README:
+if "hy2-safe v1.1.8 · Hysteria 2 管理菜单" not in README:
     raise AssertionError("README menu version must match the release")
 if "vps-security-bootstrap" not in README or "服务控制与诊断" not in README:
     raise AssertionError("README must explain firewall integration and controlled recovery")
@@ -702,6 +712,8 @@ if "直接回车默认：是" not in README or "直接回车默认：否" not in
     raise AssertionError("README must explain yes/no defaults in plain language")
 if "进入下个月后新月份从 `0` 开始" not in README:
     raise AssertionError("README must explain natural-month traffic resets")
+if "仅 IPv6 公网 VPS" not in README or "iptables` 和 `ip6tables" not in README:
+    raise AssertionError("README must document IPv6-only port-hopping requirements")
 combined_public_text = SCRIPT + "\n" + README
 for email in re.findall(
     r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}\b",
