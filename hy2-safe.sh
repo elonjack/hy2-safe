@@ -15,7 +15,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.1.3"
+readonly PROGRAM_VERSION="1.1.4"
 # Hysteria's official GitHub organization was renamed from apernet to
 # HyNetworks. Keep this canonical owner in sync with the URL checks below:
 # those checks deliberately fail closed if GitHub Release metadata points to
@@ -4831,8 +4831,8 @@ command_sync_runtime() {
 }
 
 command_manager_update() {
+  local hy2_is_installed=0
   require_root
-  require_systemd
   case "${1:-}" in
     "") ;;
     -h|--help)
@@ -4841,8 +4841,10 @@ command_manager_update() {
       ;;
     *) die "manager-update 不接受选项：$1" ;;
   esac
-  [[ -f "$SETTINGS_PATH" ]] || die "请先安装 Hy2。"
-  validate_root_secret_file "$SETTINGS_PATH" "hy2-safe 设置文件"
+  if [[ -f "$SETTINGS_PATH" ]]; then
+    validate_root_secret_file "$SETTINGS_PATH" "hy2-safe 设置文件"
+    hy2_is_installed=1
+  fi
   exec 9>"$LOCK_PATH"
   flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
   fetch_verified_manager_release
@@ -4855,9 +4857,14 @@ command_manager_update() {
   fi
   install -m 0755 -o root -g root "$FETCHED_MANAGER_SCRIPT" "${MANAGER_PATH}.new"
   mv -f -- "${MANAGER_PATH}.new" "$MANAGER_PATH"
-  info "hy2-safe 管理脚本已更新到 ${FETCHED_MANAGER_VERSION}，正在同步提醒运行时。"
+  info "hy2-safe 管理脚本已更新到 ${FETCHED_MANAGER_VERSION}。"
   flock -u 9
-  "$MANAGER_PATH" sync-runtime
+  if [[ "$hy2_is_installed" -eq 1 ]]; then
+    info "正在同步已安装 Hy2 的提醒运行时。"
+    "$MANAGER_PATH" sync-runtime
+  else
+    info "当前尚未安装 Hy2；管理脚本已更新，未创建服务、定时器或配置。"
+  fi
 }
 
 command_rotate_password() {

@@ -132,10 +132,10 @@ VPS 系统防火墙和云厂商安全组是两层不同的过滤：
 以 `root` 登录 VPS，复制下面一整行：
 
 ```bash
-apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.3/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.3/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
+apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.4/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.4/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
 ```
 
-这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.1.3` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
+这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.1.4` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
 
 如果想先查看：
 
@@ -194,7 +194,7 @@ hy2-safe
 菜单如下：
 
 ```text
-hy2-safe v1.1.3 · Hysteria 2 管理菜单
+hy2-safe v1.1.4 · Hysteria 2 管理菜单
 
   1) 安装 Hy2
   2) 完整卸载 Hy2
@@ -253,7 +253,7 @@ hy2-safe service restart
 hy2-safe manager-update
 ```
 
-打开已安装实例的交互菜单时，脚本会只读查询一次最新稳定 Release；如果存在更高版本，会显示提示并指向菜单 `16`。此检查不会下载、替换或重启任何服务；网络异常时也会静默跳过。选择菜单 `16` 后，脚本才会从本仓库读取最新稳定 Release，拒绝草稿、预发布和降级；随后校验固定下载地址、GitHub Asset SHA-256、Release 内置 SHA-256、文件大小和脚本版本，才原子替换管理脚本。旧版会备份到 `/usr/local/sbin/hy2-safe.previous`。最后会同步 Telegram 提醒程序、权限与 systemd 单元，但**不会重启 Hy2 服务**。
+打开已安装实例的交互菜单时，脚本会只读查询一次最新稳定 Release；如果存在更高版本，会显示提示并指向菜单 `16`。此检查不会下载、替换或重启任何服务；网络异常时也会静默跳过。选择菜单 `16` 后，脚本才会从本仓库读取最新稳定 Release，拒绝草稿、预发布和降级；随后校验固定下载地址、GitHub Asset SHA-256、Release 内置 SHA-256、文件大小和脚本版本，才原子替换管理脚本。旧版会备份到 `/usr/local/sbin/hy2-safe.previous`。已经安装 Hy2 时，更新后会同步 Telegram 提醒程序、权限与 systemd 单元，但**不会重启 Hy2 服务**；尚未安装 Hy2 时也可以更新管理脚本，且不会创建服务、定时器或配置。
 
 `hy2-safe update` 仍然只更新 Hysteria 官方核心；这两个更新互不混淆。
 
@@ -1086,6 +1086,6 @@ hy2-safe rotate-password
 
 ## 版本
 
-当前正式版本：`v1.1.3`
+当前正式版本：`v1.1.4`
 
 Release 页面：[elonjack/hy2-safe/releases](https://github.com/elonjack/hy2-safe/releases)
