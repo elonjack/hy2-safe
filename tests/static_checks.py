@@ -22,7 +22,7 @@ def forbid(pattern: str, message: str) -> None:
 
 
 require(r"^set -Eeuo pipefail$", "strict Bash mode is required")
-require(r'PROGRAM_VERSION="1\.1\.8"', "the release must expose its manager version")
+require(r'PROGRAM_VERSION="1\.1\.9"', "the release must expose its manager version")
 require(r"command_manager_update", "the manager must expose a self-update command")
 require(r"当前尚未安装 Hy2；管理脚本已更新", "manager updates must work before the first Hy2 install")
 require(r'\[\[ "\$relation" -eq 0 && "\$source_path" == "\$MANAGER_PATH" \]\]', "external manager launchers must still fetch a verified release")
@@ -173,6 +173,7 @@ require(r'-z "\$\{NO_COLOR\+x\}"', "NO_COLOR must disable ANSI styling")
 require(r'"\$\{TERM:-dumb\}" != "dumb"', "dumb terminals must not receive ANSI styling")
 require(r"\[\[ -t 1", "redirected output must not receive ANSI styling")
 require(r"menu_item", "menu options must use one consistent formatter")
+require(r"%2s\)", "menu item labels must stay aligned after single-digit options")
 require(r"COLOR_YELLOW=\$'\\033\[33m'", "prompts and menu choices must use ANSI yellow")
 require(r"COLOR_CYAN=\$'\\033\[36m'", "menu headings must use ANSI cyan")
 require(r"COLOR_GREEN=\$'\\033\[32m'", "informational output must use ANSI green")
@@ -696,7 +697,7 @@ if README.count("```") % 2:
     raise AssertionError("README fenced code blocks must be balanced")
 if "[!IMPORTANT]" not in README or "[!WARNING]" not in README:
     raise AssertionError("README must make the main safety warnings prominent")
-if "hy2-safe v1.1.8 · Hysteria 2 管理菜单" not in README:
+if "hy2-safe v1.1.9 · Hysteria 2 管理菜单" not in README:
     raise AssertionError("README menu version must match the release")
 if "vps-security-bootstrap" not in README or "服务控制与诊断" not in README:
     raise AssertionError("README must explain firewall integration and controlled recovery")

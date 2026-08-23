@@ -7,7 +7,7 @@ export HY2_SAFE_SOURCE_ONLY=1
 # shellcheck source=../hy2-safe.sh
 source "${TEST_ROOT}/hy2-safe.sh"
 
-[[ "$PROGRAM_VERSION" == "1.1.8" ]]
+[[ "$PROGRAM_VERSION" == "1.1.9" ]]
 validate_domain "hy2.example.com"
 ! validate_domain "invalid_domain"
 validate_email "owner@example.com"
@@ -25,14 +25,16 @@ validate_password "0123456789abcdef"
 [[ "$(compare_versions v2.10.0 v2.9.0)" == "1" ]]
 [[ "$(compare_versions v2.10.0 v2.10.0)" == "0" ]]
 [[ "$(compare_versions v2.9.0 v2.10.0)" == "-1" ]]
+[[ "$(menu_item "1" "single-digit")" == "   1) single-digit" ]]
+[[ "$(menu_item "10" "double-digit")" == "  10) double-digit" ]]
 
 manager_latest_version_for_notice() {
-  printf 'v1.1.9\n'
+  printf 'v1.1.10\n'
 }
 update_notice="$(notice_manager_update_available)"
-[[ "$update_notice" == *"发现可用的 hy2-safe 管理脚本更新：v1.1.8 → v1.1.9"* ]]
+[[ "$update_notice" == *"发现可用的 hy2-safe 管理脚本更新：v1.1.9 → v1.1.10"* ]]
 manager_latest_version_for_notice() {
-  printf 'v1.1.8\n'
+  printf 'v1.1.9\n'
 }
 [[ -z "$(notice_manager_update_available)" ]]
 manager_latest_version_for_notice() {

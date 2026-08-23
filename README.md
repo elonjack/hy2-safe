@@ -132,10 +132,10 @@ VPS 系统防火墙和云厂商安全组是两层不同的过滤：
 以 `root` 登录 VPS，复制下面一整行：
 
 ```bash
-apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.8/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.8/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
+apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.9/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.9/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
 ```
 
-这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.1.8` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
+这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.1.9` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
 
 > [!IMPORTANT]
 > ### 旧版管理脚本的一次性引导升级
@@ -147,7 +147,7 @@ apt-get update && apt-get install -y --no-install-recommends ca-certificates cur
 > - 需要把手动下载的新版脚本写入正式管理路径 `/usr/local/sbin/hy2-safe`。
 >
 > ```bash
-> apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.8/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.8/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh manager-update
+> apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.9/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.9/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh manager-update
 > ```
 >
 > 该命令会先验证下载的脚本，再更新管理脚本；即使当前尚未安装 Hy2，也不会创建 Hy2 服务、定时器或配置。完成这一次后，以后直接通过菜单 `16` 即可。
@@ -209,17 +209,17 @@ hy2-safe
 菜单如下：
 
 ```text
-hy2-safe v1.1.8 · Hysteria 2 管理菜单
+hy2-safe v1.1.9 · Hysteria 2 管理菜单
 
-  1) 安装 Hy2
-  2) 完整卸载 Hy2
-  3) 添加 Telegram 通知
-  4) 更换 Telegram 机器人
-  5) 删除 Telegram 通知
-  6) 显示客户端配置
-  7) 修改 Hy2 配置
-  8) 立即检查 Hy2 更新（默认另有每周自动更新）
-  9) 查看 Hy2 版本、服务和自动更新状态
+   1) 安装 Hy2
+   2) 完整卸载 Hy2
+   3) 添加 Telegram 通知
+   4) 更换 Telegram 机器人
+   5) 删除 Telegram 通知
+   6) 显示客户端配置
+   7) 修改 Hy2 配置
+   8) 立即检查 Hy2 更新（默认另有每周自动更新）
+   9) 查看 Hy2 版本、服务和自动更新状态
   10) 立即发送 Telegram 流量报告
   11) 设置 Telegram 消息名称
   12) 一键重置 Hy2 密码
@@ -227,7 +227,7 @@ hy2-safe v1.1.8 · Hysteria 2 管理菜单
   14) 设置 Telegram 重连提醒频率
   15) 设置 Telegram 通知偏好
   16) 更新 hy2-safe 管理脚本并同步提醒
-  0) 退出
+   0) 退出
 ```
 
 菜单一次执行一个操作。修改配置或密码轮换失败时，脚本会恢复原配置；Hysteria 更新失败时，会尝试恢复上一版本。

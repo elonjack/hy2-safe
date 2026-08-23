@@ -15,7 +15,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.1.8"
+readonly PROGRAM_VERSION="1.1.9"
 # Hysteria's official GitHub organization was renamed from apernet to
 # HyNetworks. Keep this canonical owner in sync with the URL checks below:
 # those checks deliberately fail closed if GitHub Release metadata points to
@@ -157,7 +157,7 @@ prompt_yes_no() {
 menu_item() {
   local number="$1"
   local label="$2"
-  printf '  %b%b%s)%b %b%s%b\n' \
+  printf '  %b%b%2s)%b %b%s%b\n' \
     "$COLOR_BOLD" "$COLOR_YELLOW" "$number" "$COLOR_RESET" \
     "$COLOR_YELLOW" "$label" "$COLOR_RESET"
 }
