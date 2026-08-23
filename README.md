@@ -137,6 +137,21 @@ apt-get update && apt-get install -y --no-install-recommends ca-certificates cur
 
 这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.1.5` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
 
+> [!IMPORTANT]
+> ### 旧版管理脚本的一次性引导升级
+>
+> 不是所有旧实例都需要这一步：已安装 Hy2 且 `hy2-safe manager-update` 能正常执行时，直接使用该命令即可。只有以下任一情况才需要运行下面整行一次：
+>
+> - 菜单没有 `16) 更新 hy2-safe 管理脚本并同步提醒`；
+> - 选择菜单 `16` 或执行 `hy2-safe manager-update` 后提示“请先安装 Hy2”；
+> - 需要把手动下载的新版脚本写入正式管理路径 `/usr/local/sbin/hy2-safe`。
+>
+> ```bash
+> apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.5/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.5/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh manager-update
+> ```
+>
+> 该命令会先验证下载的脚本，再更新管理脚本；即使当前尚未安装 Hy2，也不会创建 Hy2 服务、定时器或配置。完成这一次后，以后直接通过菜单 `16` 即可。
+
 如果想先查看：
 
 ```bash
