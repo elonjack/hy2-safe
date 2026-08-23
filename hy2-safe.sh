@@ -15,7 +15,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.1.2"
+readonly PROGRAM_VERSION="1.1.3"
 # Hysteria's official GitHub organization was renamed from apernet to
 # HyNetworks. Keep this canonical owner in sync with the URL checks below:
 # those checks deliberately fail closed if GitHub Release metadata points to
@@ -403,14 +403,8 @@ else:
 PY
 }
 
-manager_latest_version() {
+parse_manager_latest_version() {
   local metadata="$1"
-  curl_secure \
-    --max-filesize 1048576 \
-    -H 'Accept: application/vnd.github+json' \
-    -H 'X-GitHub-Api-Version: 2022-11-28' \
-    "$MANAGER_API_URL" \
-    --output "$metadata"
   python3 - "$metadata" <<'PY'
 import json
 import re
@@ -425,6 +419,52 @@ if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag):
     raise SystemExit("invalid manager release tag")
 print(tag)
 PY
+}
+
+manager_latest_version() {
+  local metadata="$1"
+  curl_secure \
+    --max-filesize 1048576 \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "$MANAGER_API_URL" \
+    --output "$metadata"
+  parse_manager_latest_version "$metadata"
+}
+
+manager_latest_version_for_notice() {
+  local metadata="$1"
+  curl \
+    --fail \
+    --location \
+    --silent \
+    --show-error \
+    --proto '=https' \
+    --proto-redir '=https' \
+    --tlsv1.2 \
+    --retry 0 \
+    --connect-timeout 3 \
+    --max-time 8 \
+    --max-filesize 1048576 \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "$MANAGER_API_URL" \
+    --output "$metadata"
+  parse_manager_latest_version "$metadata"
+}
+
+notice_manager_update_available() {
+  local metadata version relation
+  metadata="$(mktemp /tmp/hy2-safe.XXXXXXXX)" || return 0
+  if ! version="$(manager_latest_version_for_notice "$metadata" 2>/dev/null)"; then
+    rm -f -- "$metadata"
+    return 0
+  fi
+  rm -f -- "$metadata"
+  relation="$(compare_versions "$version" "v${PROGRAM_VERSION}")" || return 0
+  if [[ "$relation" -gt 0 ]]; then
+    info "发现可用的 hy2-safe 管理脚本更新：v${PROGRAM_VERSION} → ${version}；如需更新，请选择菜单 16。"
+  fi
 }
 
 fetch_verified_manager_release() {
@@ -5139,6 +5179,7 @@ command_menu() {
   if [[ -f "$SETTINGS_PATH" ]]; then
     validate_root_secret_file "$SETTINGS_PATH" "hy2-safe 设置文件"
     printf '%b当前状态：已安装 Hy2%b\n' "$COLOR_GREEN" "$COLOR_RESET"
+    notice_manager_update_available
   else
     printf '%b当前状态：尚未安装 Hy2%b\n' "$COLOR_YELLOW" "$COLOR_RESET"
   fi

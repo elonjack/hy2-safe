@@ -22,8 +22,12 @@ def forbid(pattern: str, message: str) -> None:
 
 
 require(r"^set -Eeuo pipefail$", "strict Bash mode is required")
-require(r'PROGRAM_VERSION="1\.1\.2"', "the release must expose its manager version")
+require(r'PROGRAM_VERSION="1\.1\.3"', "the release must expose its manager version")
 require(r"command_manager_update", "the manager must expose a self-update command")
+require(r"notice_manager_update_available", "the interactive menu must check for manager updates")
+require(r"manager_latest_version_for_notice", "the update notice must use its bounded read-only check")
+require(r"发现可用的 hy2-safe 管理脚本更新", "available manager updates must be shown clearly")
+require(r"菜单 16", "the update notice must direct users to the confirmation menu option")
 require(r"MANAGER_API_URL", "manager updates must use the official GitHub Release API")
 require(r"hy2-safe.sh.sha256", "manager updates must require a checksum asset")
 require(r"PREVIOUS_MANAGER_PATH", "manager updates must preserve the prior manager")
@@ -669,7 +673,7 @@ if README.count("```") % 2:
     raise AssertionError("README fenced code blocks must be balanced")
 if "[!IMPORTANT]" not in README or "[!WARNING]" not in README:
     raise AssertionError("README must make the main safety warnings prominent")
-if "hy2-safe v1.1.2 · Hysteria 2 管理菜单" not in README:
+if "hy2-safe v1.1.3 · Hysteria 2 管理菜单" not in README:
     raise AssertionError("README menu version must match the release")
 if "vps-security-bootstrap" not in README or "服务控制与诊断" not in README:
     raise AssertionError("README must explain firewall integration and controlled recovery")
