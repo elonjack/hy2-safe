@@ -22,7 +22,7 @@ def forbid(pattern: str, message: str) -> None:
 
 
 require(r"^set -Eeuo pipefail$", "strict Bash mode is required")
-require(r'PROGRAM_VERSION="1\.1\.5"', "the release must expose its manager version")
+require(r'PROGRAM_VERSION="1\.1\.6"', "the release must expose its manager version")
 require(r"command_manager_update", "the manager must expose a self-update command")
 require(r"当前尚未安装 Hy2；管理脚本已更新", "manager updates must work before the first Hy2 install")
 require(r'\[\[ "\$relation" -eq 0 && "\$source_path" == "\$MANAGER_PATH" \]\]', "external manager launchers must still fetch a verified release")
@@ -153,8 +153,11 @@ require(r"更换 Telegram 机器人", "the menu must expose Telegram bot replace
 require(r"删除 Telegram 通知", "the menu must expose Telegram notification removal")
 require(r"3\)[\s\S]*?command_telegram_add", "the add menu entry must not silently replace an existing bot")
 require(r"telegram-replace\) command_telegram_replace", "Telegram replacement needs a direct command")
-require(r"立即检查更新（默认另有每周自动更新）", "manual update must be distinguished from automatic updates")
-require(r"查看版本、服务和自动更新状态", "the status menu must clearly advertise version output")
+require(r"立即更新 Hysteria 2 核心（不更新管理脚本）", "manual core updates must be clearly distinguished from manager updates")
+require(r"查看 Hy2 版本、服务、证书和自动更新状态", "the status menu must clearly advertise its scope")
+require(r"服务控制与诊断（启动/停止/重启/日志）", "the service menu must clearly advertise its controls")
+require(r"ensure_hysteria_service_enabled", "runtime syncs must restore Hy2 boot persistence")
+require(r"Hy2 服务当前未运行，客户端无法连接", "inactive Hy2 services must produce an actionable warning")
 require(r"initialize_colors", "interactive output must initialize colors centrally")
 require(r'-z "\$\{NO_COLOR\+x\}"', "NO_COLOR must disable ANSI styling")
 require(r'"\$\{TERM:-dumb\}" != "dumb"', "dumb terminals must not receive ANSI styling")
@@ -683,7 +686,7 @@ if README.count("```") % 2:
     raise AssertionError("README fenced code blocks must be balanced")
 if "[!IMPORTANT]" not in README or "[!WARNING]" not in README:
     raise AssertionError("README must make the main safety warnings prominent")
-if "hy2-safe v1.1.5 · Hysteria 2 管理菜单" not in README:
+if "hy2-safe v1.1.6 · Hysteria 2 管理菜单" not in README:
     raise AssertionError("README menu version must match the release")
 if "vps-security-bootstrap" not in README or "服务控制与诊断" not in README:
     raise AssertionError("README must explain firewall integration and controlled recovery")

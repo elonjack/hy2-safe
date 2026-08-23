@@ -15,7 +15,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.1.5"
+readonly PROGRAM_VERSION="1.1.6"
 # Hysteria's official GitHub organization was renamed from apernet to
 # HyNetworks. Keep this canonical owner in sync with the URL checks below:
 # those checks deliberately fail closed if GitHub Release metadata points to
@@ -3406,6 +3406,23 @@ configure_health_timer() {
   systemctl enable --now "$HEALTH_TIMER_NAME"
 }
 
+ensure_hysteria_service_enabled() {
+  if systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
+    return 0
+  fi
+  if systemctl enable "$SERVICE_NAME" >/dev/null 2>&1; then
+    info "Hy2 服务已设为开机自动启动。"
+  else
+    warn "Hy2 当前可以运行，但未能设为开机自动启动；请运行：systemctl enable ${SERVICE_NAME}"
+  fi
+}
+
+warn_if_hysteria_service_inactive() {
+  if ! systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+    warn "Hy2 服务当前未运行，客户端无法连接；请选择菜单 13 启动服务或运行：hy2-safe service start。"
+  fi
+}
+
 refresh_managed_runtime() {
   require_systemd
   install_dependencies
@@ -3416,9 +3433,11 @@ refresh_managed_runtime() {
   ensure_mimic_available
   install_manager_copy
   write_systemd_units
+  ensure_hysteria_service_enabled
   flock -u 8
   configure_update_timer
   configure_health_timer
+  warn_if_hysteria_service_inactive
   info "管理脚本、服务账号权限和 systemd 单元已同步到当前版本。"
 }
 
@@ -4822,12 +4841,14 @@ command_sync_runtime() {
   install_manager_copy
   ensure_service_user_and_directories
   write_systemd_units
+  ensure_hysteria_service_enabled
   configure_update_timer
   configure_health_timer
   if [[ "$TELEGRAM_ENABLED" -eq 1 ]]; then
     configure_notifier_service ||
       die "新版 Telegram 提醒运行时同步失败；请运行 hy2-safe telegram-logs。"
   fi
+  warn_if_hysteria_service_inactive
   info "hy2-safe 管理脚本与提醒运行时已同步；Hy2 服务未重启。"
 }
 
@@ -4942,7 +4963,12 @@ command_status() {
   if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
     printf 'Hy2 服务：正在运行\n'
   else
-    printf 'Hy2 服务：未运行或异常\n'
+    printf 'Hy2 服务：未运行；客户端无法连接。请使用菜单 13 启动或运行：hy2-safe service start\n'
+  fi
+  if systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
+    printf 'Hy2 开机自启：已开启\n'
+  else
+    printf 'Hy2 开机自启：未开启；下次 VPS 重启后不会自动启动\n'
   fi
   if systemctl is-enabled --quiet "$TIMER_NAME" 2>/dev/null; then
     printf '每周自动更新：已开启（下面显示下次检查时间）\n'
@@ -5021,6 +5047,7 @@ command_service() {
       systemctl reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
       acme_log_cursor="$(service_log_cursor)"
       if systemctl start "$SERVICE_NAME" && wait_for_service; then
+        ensure_hysteria_service_enabled
         configure_notifier_service ||
           warn "Hysteria 已启动，但 Telegram 提醒服务未能启动；请运行 hy2-safe telegram-logs。"
         info "Hysteria 服务运行正常。"
@@ -5199,12 +5226,12 @@ command_menu() {
   menu_item "5" "删除 Telegram 通知"
   menu_item "6" "显示客户端配置"
   menu_item "7" "修改 Hy2 配置"
-  menu_item "8" "立即检查更新（默认另有每周自动更新）"
-  menu_item "9" "查看版本、服务和自动更新状态"
+  menu_item "8" "立即更新 Hysteria 2 核心（不更新管理脚本）"
+  menu_item "9" "查看 Hy2 版本、服务、证书和自动更新状态"
   menu_item "10" "立即发送 Telegram 流量报告"
   menu_item "11" "设置 Telegram 消息名称"
   menu_item "12" "一键重置 Hy2 密码"
-  menu_item "13" "服务控制与诊断"
+  menu_item "13" "服务控制与诊断（启动/停止/重启/日志）"
   menu_item "14" "设置 Telegram 重连提醒频率"
   menu_item "15" "设置 Telegram 通知偏好"
   menu_item "16" "更新 hy2-safe 管理脚本并同步提醒"
