@@ -132,10 +132,10 @@ VPS 系统防火墙和云厂商安全组是两层不同的过滤：
 以 `root` 登录 VPS，复制下面一整行：
 
 ```bash
-apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.1/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.1/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
+apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.2/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.2/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
 ```
 
-这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.1.1` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
+这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.1.2` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
 
 如果想先查看：
 
@@ -194,7 +194,7 @@ hy2-safe
 菜单如下：
 
 ```text
-hy2-safe v1.1.1 · Hysteria 2 管理菜单
+hy2-safe v1.1.2 · Hysteria 2 管理菜单
 
   1) 安装 Hy2
   2) 完整卸载 Hy2
@@ -795,7 +795,7 @@ hy2-safe
 
 ### 下载与更新
 
-- 只接受 `apernet/hysteria` 官方稳定 Release。
+- 只接受 `HyNetworks/hysteria` 官方稳定 Release（Hysteria 官方仓库已从 `apernet` 更名）。
 - 版本号必须匹配 `app/v数字.数字.数字`。
 - 下载 URL 必须与官方仓库、版本和架构完全匹配。
 - 限制元数据、哈希文件和二进制最大体积。
@@ -1086,6 +1086,6 @@ hy2-safe rotate-password
 
 ## 版本
 
-当前正式版本：`v1.1.1`
+当前正式版本：`v1.1.2`
 
 Release 页面：[elonjack/hy2-safe/releases](https://github.com/elonjack/hy2-safe/releases)

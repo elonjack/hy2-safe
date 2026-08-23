@@ -3,7 +3,7 @@
 # hy2-safe - a small, auditable Hysteria 2 server installer/manager.
 #
 # Security properties:
-#   - downloads only official apernet/hysteria stable releases;
+#   - downloads only official HyNetworks/hysteria stable releases;
 #   - verifies the selected binary against GitHub's asset digest and hashes.txt;
 #   - installs atomically and rolls back a failed update;
 #   - runs Hysteria as an unprivileged user with a hardened systemd unit;
@@ -15,8 +15,12 @@ IFS=$'\n\t'
 umask 077
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.1.1"
-readonly REPOSITORY="apernet/hysteria"
+readonly PROGRAM_VERSION="1.1.2"
+# Hysteria's official GitHub organization was renamed from apernet to
+# HyNetworks. Keep this canonical owner in sync with the URL checks below:
+# those checks deliberately fail closed if GitHub Release metadata points to
+# a different repository.
+readonly REPOSITORY="HyNetworks/hysteria"
 readonly API_URL="https://api.github.com/repos/${REPOSITORY}/releases/latest"
 readonly RELEASE_URL="https://github.com/${REPOSITORY}/releases/download"
 readonly MANAGER_REPOSITORY="elonjack/hy2-safe"

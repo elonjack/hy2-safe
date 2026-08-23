@@ -22,7 +22,7 @@ def forbid(pattern: str, message: str) -> None:
 
 
 require(r"^set -Eeuo pipefail$", "strict Bash mode is required")
-require(r'PROGRAM_VERSION="1\.1\.1"', "the release must expose its manager version")
+require(r'PROGRAM_VERSION="1\.1\.2"', "the release must expose its manager version")
 require(r"command_manager_update", "the manager must expose a self-update command")
 require(r"MANAGER_API_URL", "manager updates must use the official GitHub Release API")
 require(r"hy2-safe.sh.sha256", "manager updates must require a checksum asset")
@@ -42,7 +42,7 @@ require(r"stat -c '%s'", "download sizes must match release metadata")
 require(r"reported_version=", "the verified binary must report its version")
 require(r'"\$reported_version" == "\$version"', "the binary version must match release metadata")
 require(r'sub\(/\^\.\*\\//, "", candidate\)', "hashes.txt build/ paths must be normalized")
-require(r"REPOSITORY=\"apernet/hysteria\"", "downloads must use the official repository")
+require(r"REPOSITORY=\"HyNetworks/hysteria\"", "downloads must use Hysteria's canonical official repository")
 require(r"service_identity=\$'User=hysteria\\nGroup=hysteria'", "the default service must run as the dedicated user")
 require(r"现有 hysteria 用户具有可登录 Shell", "pre-existing service users must be validated")
 require(r"hysteria 组包含额外成员", "the config-reading group must reject extra members")
@@ -669,7 +669,7 @@ if README.count("```") % 2:
     raise AssertionError("README fenced code blocks must be balanced")
 if "[!IMPORTANT]" not in README or "[!WARNING]" not in README:
     raise AssertionError("README must make the main safety warnings prominent")
-if "hy2-safe v1.1.1 · Hysteria 2 管理菜单" not in README:
+if "hy2-safe v1.1.2 · Hysteria 2 管理菜单" not in README:
     raise AssertionError("README menu version must match the release")
 if "vps-security-bootstrap" not in README or "服务控制与诊断" not in README:
     raise AssertionError("README must explain firewall integration and controlled recovery")
