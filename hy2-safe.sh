@@ -15,7 +15,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.1.4"
+readonly PROGRAM_VERSION="1.1.5"
 # Hysteria's official GitHub organization was renamed from apernet to
 # HyNetworks. Keep this canonical owner in sync with the URL checks below:
 # those checks deliberately fail closed if GitHub Release metadata points to
@@ -468,8 +468,9 @@ notice_manager_update_available() {
 }
 
 fetch_verified_manager_release() {
-  local metadata version relation script_url checksum_url script_digest checksum_digest
+  local metadata version relation source_path script_url checksum_url script_digest checksum_digest
   local script_size checksum_size script_actual checksum_actual reported_version
+  source_path="$(readlink -f "$0")"
   TMP_ROOT="$(mktemp -d /tmp/hy2-safe.XXXXXXXX)"
   metadata="${TMP_ROOT}/manager-release.json"
   version="$(manager_latest_version "$metadata")" ||
@@ -478,7 +479,7 @@ fetch_verified_manager_release() {
     die "无法比较 hy2-safe 管理脚本版本。"
   [[ "$relation" -ge 0 ]] ||
     die "GitHub Release ${version} 低于当前管理脚本 v${PROGRAM_VERSION}，拒绝降级。"
-  if [[ "$relation" -eq 0 ]]; then
+  if [[ "$relation" -eq 0 && "$source_path" == "$MANAGER_PATH" ]]; then
     FETCHED_MANAGER_VERSION="$version"
     FETCHED_MANAGER_SCRIPT=""
     return 0
