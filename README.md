@@ -132,10 +132,10 @@ VPS 系统防火墙和云厂商安全组是两层不同的过滤：
 以 `root` 登录 VPS，复制下面一整行：
 
 ```bash
-apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.10/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.10/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
+apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.11/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.11/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
 ```
 
-这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.1.10` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
+这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.1.11` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
 
 > [!IMPORTANT]
 > ### 旧版管理脚本的一次性引导升级
@@ -147,7 +147,7 @@ apt-get update && apt-get install -y --no-install-recommends ca-certificates cur
 > - 需要把手动下载的新版脚本写入正式管理路径 `/usr/local/sbin/hy2-safe`。
 >
 > ```bash
-> apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.10/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.10/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh manager-update
+> apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.11/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.11/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh manager-update
 > ```
 >
 > 该命令会先验证下载的脚本，再更新管理脚本；即使当前尚未安装 Hy2，也不会创建 Hy2 服务、定时器或配置。完成这一次后，以后直接通过菜单 `16` 即可。
@@ -209,7 +209,7 @@ hy2-safe
 菜单如下：
 
 ```text
-hy2-safe v1.1.10 · Hysteria 2 管理菜单
+hy2-safe v1.1.11 · Hysteria 2 管理菜单
 
    1) 安装 Hy2
    2) 完整卸载 Hy2
@@ -831,10 +831,13 @@ hy2-safe
 - 下载 URL 必须与官方仓库、版本和架构完全匹配。
 - 限制元数据、哈希文件和二进制最大体积。
 - 同时验证 GitHub Asset digest 和官方 `hashes.txt`。
-- 验证二进制自身报告版本。
+- 验证二进制自身报告版本；版本探测会切换到无配置读取权限的 `nobody` 身份，清空环境并设置 10 秒超时，不会为了读取版本直接执行为 root。定时更新单元只保留完成这次降权所需的 `CAP_SETUID` 与 `CAP_SETGID`。
 - 拒绝低于 `v2.8.0`、不支持当前原生端口范围和 BBR profile 的旧核心。
 - 不自动降级。
 - 更新失败自动尝试回滚。
+
+> [!NOTE]
+> Asset digest 和 Release 内的 SHA-256 能发现传输损坏或文件不一致，但它们与 Release 都属于同一个 GitHub 信任边界，不等同于仓库之外的独立发布签名。请为 GitHub 账号启用强 2FA、保护 Release 权限；项目后续还应加入固定公钥的 Release 签名。
 
 ### 权限
 
@@ -844,7 +847,10 @@ hy2-safe
 - 账号家目录由 `root` 控制，只有 ACME 证书子目录允许服务写入。
 - root-only 归属文件记录脚本创建的用户 UID 和组 GID，卸载时必须匹配才会删除。
 - 单端口只授予 `CAP_NET_BIND_SERVICE`。
-- 端口跳跃额外授予必需的 `CAP_NET_ADMIN` 和 `AF_NETLINK`。
+- 端口跳跃按 Hysteria 上游要求额外授予 `CAP_NET_ADMIN` 和 `AF_NETLINK`；核心因此能够修改主机网络规则，不需要端口跳跃时可改用单端口缩小权限。
+- Mimic 按上游要求让 Hysteria 长期以 root 运行，安全隔离明显弱于普通模式；高安全要求环境应保持关闭。
+- 管理脚本固定可信 `PATH`、清除继承的 Python 路径变量，并让所有内嵌 Python 使用隔离模式，避免从当前目录导入同名恶意模块。
+- 管理任务锁位于 `/run/hy2-safe/manager.lock`，其父目录严格为 `root:root 0700`，不会使用普通用户可抢占的共享 `/run/lock` 文件名。
 - systemd 启用文件系统、设备、内核、`/proc` 和可写执行内存限制。
 
 ### 密钥和配置
@@ -891,6 +897,7 @@ hy2-safe
 | `/usr/local/bin/hysteria` | 当前 Hysteria 核心 |
 | `/usr/local/bin/hysteria.previous` | 更新回滚版本 |
 | `/usr/local/sbin/hy2-safe` | 管理脚本 |
+| `/run/hy2-safe/manager.lock` | root-only 管理任务锁；重启后自动重建 |
 | `/etc/hysteria/config.yaml` | Hysteria 服务端配置；DNS-01 模式含 Cloudflare Token，权限 `0640 root:hysteria` |
 | `/etc/hysteria/hy2-safe.env` | root-only 管理设置；DNS-01 模式含 Cloudflare Token，权限 `0600` |
 | `/etc/hysteria/hy2-safe-account.env` | root-only 服务账号创建归属与 UID/GID 记录 |
@@ -1118,6 +1125,6 @@ hy2-safe rotate-password
 
 ## 版本
 
-当前正式版本：`v1.1.10`
+当前正式版本：`v1.1.11`
 
 Release 页面：[elonjack/hy2-safe/releases](https://github.com/elonjack/hy2-safe/releases)

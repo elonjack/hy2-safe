@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 #
 # hy2-safe - a small, auditable Hysteria 2 server installer/manager.
 #
@@ -14,8 +14,17 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 umask 077
 
+# Root-facing commands must not inherit executable/module search paths from the
+# invoking directory or from a preserved sudo environment. Bash privileged mode
+# (the shebang's -p) also ignores BASH_ENV and exported shell functions when the
+# installed manager is executed directly.
+readonly SAFE_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+PATH="$SAFE_PATH"
+export PATH
+unset PYTHONHOME PYTHONPATH PYTHONSTARTUP ENV CDPATH GLOBIGNORE 2>/dev/null || true
+
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.1.10"
+readonly PROGRAM_VERSION="1.1.11"
 # Hysteria's official GitHub organization was renamed from apernet to
 # HyNetworks. Keep this canonical owner in sync with the URL checks below:
 # those checks deliberately fail closed if GitHub Release metadata points to
@@ -51,7 +60,8 @@ readonly SERVICE_NAME="hysteria-server.service"
 readonly TIMER_NAME="hy2-safe-update.timer"
 readonly HEALTH_TIMER_NAME="hy2-safe-health.timer"
 readonly NOTIFIER_NAME="hy2-safe-notifier.service"
-readonly LOCK_PATH="/run/lock/hy2-safe.lock"
+readonly LOCK_DIR="/run/hy2-safe"
+readonly LOCK_PATH="${LOCK_DIR}/manager.lock"
 # Read-only integration points written by elonjack/vps-security-bootstrap.
 # hy2-safe deliberately never writes these files or its nftables table.
 readonly VPS_SECURITY_CONF_DIR="/etc/vps-security"
@@ -226,7 +236,7 @@ install/configure 选项：
 说明：
   - 当前版本只支持 Debian 12/13。
   - 不会清空现有防火墙链，也不会修改 UFW、firewalld 或云安全组。
-  - 端口跳跃会让 Hysteria 原生创建并在停止时清理自己的 nftables/iptables 临时规则。
+  - 端口跳跃会授予 Hysteria CAP_NET_ADMIN，使其原生创建并在停止时清理 nftables/iptables 临时规则。
   - Mimic 需要服务器和每个客户端都是 Linux、安装 mimic，并使用 Hysteria 2 v2.12.0 或更高版本；
     启用后不能与端口跳跃共用，未启用 Mimic 的客户端将无法连接。
   - 默认 ACME HTTP-01 只需要 TCP 80；tls 只需要 TCP 443；dns 不需要入站 TCP 端口。
@@ -250,6 +260,36 @@ remove_managed_tree() {
   elif [[ -e "$target" ]]; then
     rm -f -- "$target"
   fi
+}
+
+ensure_lock_directory() {
+  local attributes
+  if [[ -e "$LOCK_DIR" || -L "$LOCK_DIR" ]]; then
+    [[ -d "$LOCK_DIR" && ! -L "$LOCK_DIR" ]] ||
+      die "管理锁目录必须是非符号链接的真实目录：$LOCK_DIR"
+  else
+    install -d -m 0700 -o root -g root "$LOCK_DIR"
+  fi
+  attributes="$(stat -c '%u:%g:%a' -- "$LOCK_DIR")" ||
+    die "无法读取管理锁目录属性：$LOCK_DIR"
+  [[ "$attributes" == "0:0:700" ]] ||
+    die "管理锁目录必须是 root:root 0700：$LOCK_DIR（当前 ${attributes}）"
+}
+
+acquire_manager_lock() {
+  ensure_lock_directory
+  [[ ! -L "$LOCK_PATH" ]] || die "管理锁文件不能是符号链接：$LOCK_PATH"
+  exec 9>"$LOCK_PATH"
+  [[ -f "$LOCK_PATH" && ! -L "$LOCK_PATH" ]] ||
+    die "无法创建安全的管理锁文件：$LOCK_PATH"
+  [[ "$(stat -c '%u:%g:%a' -- "$LOCK_PATH")" == "0:0:600" ]] ||
+    die "管理锁文件必须是 root:root 0600：$LOCK_PATH"
+  flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+}
+
+release_manager_lock() {
+  flock -u 9 >/dev/null 2>&1 || true
+  exec 9>&-
 }
 
 require_root() {
@@ -279,7 +319,7 @@ install_dependencies() {
   local command_name
   for command_name in \
     awk curl find flock getent groupadd groupdel head id install openssl passwd python3 readlink sed \
-    sha256sum ss stat timeout tr uname useradd userdel; do
+    setpriv sha256sum ss stat timeout tr uname useradd userdel; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
       missing+=("$command_name")
     fi
@@ -294,7 +334,7 @@ install_dependencies() {
 
   for command_name in \
     awk curl find flock getent groupadd groupdel head id install openssl passwd python3 readlink sed \
-    sha256sum ss stat timeout tr uname useradd userdel; do
+    setpriv sha256sum ss stat timeout tr uname useradd userdel; do
     command -v "$command_name" >/dev/null 2>&1 || die "依赖安装后仍未找到：$command_name"
   done
 }
@@ -359,7 +399,7 @@ latest_version() {
     "$API_URL" \
     --output "$metadata"
   version="$(
-    python3 - "$metadata" <<'PY'
+    /usr/bin/python3 -I - "$metadata" <<'PY'
 import json
 import re
 import sys
@@ -382,7 +422,7 @@ release_asset_field() {
   local metadata="$1"
   local asset_name="$2"
   local field="$3"
-  python3 - "$metadata" "$asset_name" "$field" <<'PY'
+  /usr/bin/python3 -I - "$metadata" "$asset_name" "$field" <<'PY'
 import json
 import sys
 
@@ -407,7 +447,7 @@ PY
 
 parse_manager_latest_version() {
   local metadata="$1"
-  python3 - "$metadata" <<'PY'
+  /usr/bin/python3 -I - "$metadata" <<'PY'
 import json
 import re
 import sys
@@ -606,12 +646,13 @@ fetch_verified_release() {
   [[ "${actual,,}" == "${expected,,}" ]] ||
     die "SHA-256 校验失败，拒绝安装。期望 ${expected}，实际 ${actual}。"
 
+  # The downloaded program is not trusted enough to execute as root merely to
+  # print its version. The directory is searchable, but not writable, by the
+  # dedicated probe identity used by binary_version below.
+  chmod 0711 "$TMP_ROOT"
   chmod 0755 "${TMP_ROOT}/${asset}"
-  reported_version="$(
-    timeout 10s "${TMP_ROOT}/${asset}" version 2>/dev/null |
-      sed -n 's/.*Version:[[:space:]]*\(v[^[:space:]]*\).*/\1/p' |
-      head -n 1
-  )" || die "官方二进制无法运行或无法报告版本，拒绝安装。"
+  reported_version="$(binary_version "${TMP_ROOT}/${asset}")" ||
+    die "官方二进制无法以非特权身份运行或无法报告版本，拒绝安装。"
   [[ "$reported_version" == "$version" ]] ||
     die "二进制报告版本 ${reported_version:-未知}，与 Release 版本 ${version} 不一致。"
 
@@ -621,16 +662,56 @@ fetch_verified_release() {
 
 installed_version() {
   if [[ -x "$BIN_PATH" ]]; then
-    "$BIN_PATH" version 2>/dev/null |
-      sed -n 's/.*Version:[[:space:]]*\(v[^[:space:]]*\).*/\1/p' |
-      head -n 1
+    binary_version "$BIN_PATH"
   else
     return 1
   fi
 }
 
+binary_version() {
+  local path="$1"
+  local owner_group permissions probe_uid probe_gid
+  [[ "$path" == /* && -f "$path" && ! -L "$path" && -x "$path" ]] || return 1
+  owner_group="$(stat -c '%u:%g' -- "$path")" || return 1
+  permissions="$(stat -c '%a' -- "$path")" || return 1
+  [[ "$owner_group" == "0:0" && "$permissions" =~ ^[0-7]{3,4}$ ]] || return 1
+  (( (8#$permissions & 0022) == 0 )) || return 1
+
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    getent passwd nobody >/dev/null 2>&1 || return 1
+    probe_uid="$(id -u nobody)" || return 1
+    probe_gid="$(id -g nobody)" || return 1
+    {
+      cd /
+      /usr/bin/timeout 10s /usr/bin/setpriv \
+        --reuid "$probe_uid" \
+        --regid "$probe_gid" \
+        --clear-groups \
+        --no-new-privs \
+        -- /usr/bin/env -i \
+        "PATH=$SAFE_PATH" \
+        HOME=/nonexistent \
+        LANG=C.UTF-8 \
+        "$path" version
+    } 2>/dev/null |
+      sed -n 's/.*Version:[[:space:]]*\(v[^[:space:]]*\).*/\1/p' |
+      head -n 1
+  else
+    {
+      cd /
+      /usr/bin/timeout 10s /usr/bin/env -i \
+        "PATH=$SAFE_PATH" \
+        HOME=/nonexistent \
+        LANG=C.UTF-8 \
+        "$path" version
+    } 2>/dev/null |
+      sed -n 's/.*Version:[[:space:]]*\(v[^[:space:]]*\).*/\1/p' |
+      head -n 1
+  fi
+}
+
 compare_versions() {
-  python3 - "$1" "$2" <<'PY'
+  /usr/bin/python3 -I - "$1" "$2" <<'PY'
 import re
 import sys
 
@@ -817,7 +898,7 @@ validate_cloudflare_token_file() {
 verify_cloudflare_token_access() {
   local zone
   zone="$(
-    python3 /dev/fd/3 "$DOMAIN" 3<<'PY' <<<"$CLOUDFLARE_API_TOKEN"
+    /usr/bin/python3 -I /dev/fd/3 "$DOMAIN" 3<<'PY' <<<"$CLOUDFLARE_API_TOKEN"
 import json
 import sys
 import urllib.parse
@@ -889,7 +970,7 @@ validate_telegram_chat_id() {
 }
 
 validate_telegram_name() {
-  python3 - "$1" <<'PY'
+  /usr/bin/python3 -I - "$1" <<'PY'
 import sys
 import unicodedata
 
@@ -938,7 +1019,7 @@ telegram_reconnect_interval_label() {
 }
 
 find_free_stats_port() {
-  python3 - <<'PY'
+  /usr/bin/python3 -I - <<'PY'
 import socket
 
 for port in range(19090, 19200):
@@ -991,7 +1072,7 @@ validate_public_masquerade_target() {
   done < <(getent ahosts "$host" | awk '!seen[$1]++ { print $1 }')
   (("${#addresses[@]}" > 0)) ||
     die "伪装站点当前无法解析：$host"
-  if ! python3 - "${addresses[@]}" <<'PY'
+  if ! /usr/bin/python3 -I - "${addresses[@]}" <<'PY'
 import ipaddress
 import sys
 
@@ -1010,7 +1091,7 @@ random_password() {
 }
 
 resolve_domain_addresses() {
-  python3 - "$1" <<'PY'
+  /usr/bin/python3 -I - "$1" <<'PY'
 import ipaddress
 import socket
 import sys
@@ -1045,7 +1126,7 @@ detect_public_ip() {
       https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null
   )" || return 1
   address="$(awk -F= '$1 == "ip" { print $2; exit }' <<<"$response")"
-  python3 - "$address" "$family" <<'PY'
+  /usr/bin/python3 -I - "$address" "$family" <<'PY'
 import ipaddress
 import sys
 
@@ -1175,7 +1256,7 @@ vps_security_ports_cover() {
   local required_end="$3"
   local port_spec
   port_spec="$(tr -d '[:space:]' <"$ports_path" 2>/dev/null)" || return 2
-  python3 - "$port_spec" "$required_start" "$required_end" <<'PY'
+  /usr/bin/python3 -I - "$port_spec" "$required_start" "$required_end" <<'PY'
 import re
 import sys
 
@@ -1724,7 +1805,7 @@ ensure_service_user_and_directories() {
 }
 
 ensure_mimic_available() {
-  local hysteria_version mimic_relation
+  local hysteria_version mimic_path mimic_relation mimic_owner_mode
   [[ "${MIMIC_ENABLED:-0}" -eq 1 ]] || return 0
   hysteria_version="$(installed_version)" ||
     die "已启用 Mimic，但未能读取当前 Hysteria 版本。"
@@ -1732,11 +1813,19 @@ ensure_mimic_available() {
     die "无法验证 Hysteria 是否支持 Mimic。"
   [[ "$mimic_relation" -ge 0 ]] ||
     die "Mimic 需要 Hysteria 2 v2.12.0 或更高版本；当前为 ${hysteria_version}，请先运行 hy2-safe update。"
-  command -v mimic >/dev/null 2>&1 ||
+  mimic_path="$(type -P mimic || true)"
+  [[ -n "$mimic_path" && -f "$mimic_path" && ! -L "$mimic_path" ]] ||
     die "已启用 Mimic，但未找到 mimic 命令。请先按 https://github.com/hack3ric/mimic/releases 安装适合 Debian 与架构的 mimic 和 mimic-dkms 软件包。"
-  mimic --version >/dev/null 2>&1 ||
+  mimic_owner_mode="$(stat -c '%u:%g:%a' -- "$mimic_path")" ||
+    die "无法读取 mimic 程序权限：$mimic_path"
+  [[ "$mimic_owner_mode" =~ ^0:0:([0-7]{3,4})$ ]] ||
+    die "mimic 程序必须由 root:root 拥有：$mimic_path"
+  (( (8#${BASH_REMATCH[1]} & 0022) == 0 )) ||
+    die "mimic 程序不能由组或其他用户写入：$mimic_path"
+  /usr/bin/timeout 10s "$mimic_path" --version >/dev/null 2>&1 ||
     die "已启用 Mimic，但 mimic 命令无法正常执行。请检查 mimic、DKMS 模块和当前内核。"
-  warn "Mimic 已启用：Hysteria 服务将以 root 运行；所有客户端必须在 Linux 上安装 mimic 并启用同一配置。"
+  warn "Mimic 已启用：按上游要求，长期运行的 Hysteria 服务将拥有 root 权限；这会明显扩大核心或 Mimic 漏洞的影响范围。"
+  warn "所有客户端必须在 Linux 上安装 mimic 并启用同一配置；高安全要求环境请保持 Mimic 关闭。"
 }
 
 restore_unprivileged_acme_ownership() {
@@ -1834,7 +1923,7 @@ write_notifier_script() {
   install -d -m 0755 -o root -g root /usr/local/libexec
   tmp="$(mktemp /usr/local/libexec/.hy2-safe-notifier.XXXXXX)"
   cat >"$tmp" <<'PY'
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Send safe Hysteria connection alerts and persisted traffic reports."""
 
 from __future__ import annotations
@@ -3159,7 +3248,7 @@ After=hysteria-server.service network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 ${NOTIFIER_PATH}
+ExecStart=/usr/bin/python3 -I ${NOTIFIER_PATH}
 Restart=on-failure
 RestartSec=15s
 DynamicUser=yes
@@ -3234,6 +3323,7 @@ UMask=0077
 
 Environment=HYSTERIA_DISABLE_UPDATE_CHECK=1
 Environment=HYSTERIA_LOG_LEVEL=info
+Environment=PATH=${SAFE_PATH}
 ${service_capability_lines}
 NoNewPrivileges=true
 PrivateDevices=true
@@ -3271,8 +3361,12 @@ After=network-online.target
 Type=oneshot
 ExecStart=${MANAGER_PATH} update --quiet
 UMask=0077
+RuntimeDirectory=hy2-safe
+RuntimeDirectoryMode=0700
 NoNewPrivileges=true
-CapabilityBoundingSet=
+# The root manager keeps only the two capabilities needed to drop the version
+# probe to nobody; the downloaded binary runs after setpriv has changed UID/GID.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
 PrivateDevices=true
 PrivateTmp=true
 ProtectClock=true
@@ -3285,7 +3379,7 @@ ProtectKernelTunables=true
 ProtectProc=invisible
 ProcSubset=pid
 ProtectSystem=strict
-ReadWritePaths=/usr/local/bin /run/lock
+ReadWritePaths=/usr/local/bin ${LOCK_DIR}
 MemoryDenyWriteExecute=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictRealtime=true
@@ -3429,14 +3523,13 @@ refresh_managed_runtime() {
   require_systemd
   install_dependencies
   load_existing_settings || die "请先安装 Hy2。"
-  exec 8>"$LOCK_PATH"
-  flock -n 8 || die "另一个 hy2-safe 任务正在运行。"
+  acquire_manager_lock
   ensure_service_user_and_directories
   ensure_mimic_available
   install_manager_copy
   write_systemd_units
   ensure_hysteria_service_enabled
-  flock -u 8
+  release_manager_lock
   configure_update_timer
   configure_health_timer
   warn_if_hysteria_service_inactive
@@ -3447,7 +3540,7 @@ discover_telegram_chats() {
   local token_file="$1"
   local candidates_file="$2"
   local pairing_code="$3"
-  python3 - "$token_file" "$candidates_file" "$pairing_code" <<'PY'
+  /usr/bin/python3 -I - "$token_file" "$candidates_file" "$pairing_code" <<'PY'
 import datetime as dt
 import json
 import sys
@@ -3542,7 +3635,7 @@ PY
 
 read_discovered_chat_id() {
   local candidates_file="$1"
-  python3 - "$candidates_file" <<'PY'
+  /usr/bin/python3 -I - "$candidates_file" <<'PY'
 import json
 import sys
 
@@ -3561,7 +3654,7 @@ telegram_send_test() {
   local token_file="$1"
   local chat_id="$2"
   local display_name="$3"
-  python3 - "$token_file" "$chat_id" "$display_name" <<'PY'
+  /usr/bin/python3 -I - "$token_file" "$chat_id" "$display_name" <<'PY'
 import html
 import json
 import sys
@@ -3610,7 +3703,7 @@ write_telegram_config() {
   local token_file="$1"
   local tmp
   tmp="$(mktemp "${CONFIG_DIR}/.telegram-notifier.XXXXXX")"
-  if ! python3 - \
+  if ! /usr/bin/python3 -I - \
     "$token_file" \
     "$TELEGRAM_CHAT_ID" \
     "$TELEGRAM_STATS_PORT" \
@@ -3666,7 +3759,7 @@ sync_telegram_name_config() {
   validate_toggle "$TELEGRAM_DAILY_REPORTS" || return 1
   validate_toggle "$TELEGRAM_MONTHLY_REPORTS" || return 1
   tmp="$(mktemp "${CONFIG_DIR}/.telegram-notifier.XXXXXX")"
-  if ! python3 - \
+  if ! /usr/bin/python3 -I - \
     "$NOTIFIER_CONFIG_PATH" \
     "$TELEGRAM_NAME" \
     "$TELEGRAM_RECONNECT_INTERVAL" \
@@ -3706,7 +3799,7 @@ PY
 }
 
 stored_telegram_send_test() {
-  python3 - "$NOTIFIER_CONFIG_PATH" <<'PY'
+  /usr/bin/python3 -I - "$NOTIFIER_CONFIG_PATH" <<'PY'
 import html
 import json
 import sys
@@ -3755,7 +3848,7 @@ send_telegram_system_event() {
   [[ -f "$NOTIFIER_CONFIG_PATH" && ! -L "$NOTIFIER_CONFIG_PATH" ]] || return 0
   [[ "$(stat -c '%u:%a' -- "$NOTIFIER_CONFIG_PATH" 2>/dev/null || true)" == "0:600" ]] ||
     return 0
-  python3 - "$NOTIFIER_CONFIG_PATH" "$event" "$detail" <<'PY'
+  /usr/bin/python3 -I - "$NOTIFIER_CONFIG_PATH" "$event" "$detail" <<'PY'
 import html
 import json
 import sys
@@ -4200,8 +4293,7 @@ command_install() {
     dns) acme_requirement="Cloudflare DNS-01（不需要入站 TCP 80/443）" ;;
   esac
 
-  exec 9>"$LOCK_PATH"
-  flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  acquire_manager_lock
 
   ensure_service_user_and_directories
   install_manager_copy
@@ -4250,7 +4342,7 @@ command_install() {
     if prompt_yes_no "是否现在开启 Telegram 成功连接提醒？" no; then
       cleanup
       TMP_ROOT=""
-      flock -u 9
+      release_manager_lock
       command_telegram_setup
     else
       printf '已跳过。以后需要时可运行：hy2-safe telegram-setup\n'
@@ -4282,8 +4374,7 @@ command_configure() {
   preflight_ports "$old_udp_start" "$old_udp_end"
   preflight_vps_security_firewall
 
-  exec 9>"$LOCK_PATH"
-  flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  acquire_manager_lock
 
   ensure_service_user_and_directories
   ensure_mimic_available
@@ -4387,8 +4478,7 @@ command_telegram_setup() {
     validate_root_secret_file "$token_input_file" "Bot Token 文件"
   fi
 
-  exec 9>"$LOCK_PATH"
-  flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  acquire_manager_lock
   ensure_service_user_and_directories
   TMP_ROOT="$(mktemp -d /tmp/hy2-safe.XXXXXXXX)"
   token_file="${TMP_ROOT}/telegram-token"
@@ -4560,8 +4650,7 @@ command_telegram_name() {
     die "Telegram 消息名称必须是 1-64 个可见字符，且首尾不能有空格。"
   old_name="$TELEGRAM_NAME"
 
-  exec 9>"$LOCK_PATH"
-  flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  acquire_manager_lock
   TMP_ROOT="$(mktemp -d /tmp/hy2-safe.XXXXXXXX)"
   cp --preserve=mode,ownership,timestamps -- "$SETTINGS_PATH" "${TMP_ROOT}/hy2-safe.env"
   cp --preserve=mode,ownership,timestamps -- \
@@ -4634,8 +4723,7 @@ command_telegram_reconnect_interval() {
     return
   fi
 
-  exec 9>"$LOCK_PATH"
-  flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  acquire_manager_lock
   TMP_ROOT="$(mktemp -d /tmp/hy2-safe.XXXXXXXX)"
   cp --preserve=mode,ownership,timestamps -- "$SETTINGS_PATH" "${TMP_ROOT}/hy2-safe.env"
   cp --preserve=mode,ownership,timestamps -- \
@@ -4718,8 +4806,7 @@ command_telegram_preferences() {
   validate_toggle "$TELEGRAM_DAILY_REPORTS" || die "Telegram 日报开关无效。"
   validate_toggle "$TELEGRAM_MONTHLY_REPORTS" || die "Telegram 月报开关无效。"
 
-  exec 9>"$LOCK_PATH"
-  flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  acquire_manager_lock
   TMP_ROOT="$(mktemp -d /tmp/hy2-safe.XXXXXXXX)"
   cp --preserve=mode,ownership,timestamps -- "$SETTINGS_PATH" "${TMP_ROOT}/hy2-safe.env"
   cp --preserve=mode,ownership,timestamps -- \
@@ -4761,8 +4848,7 @@ command_telegram_disable() {
     return
   fi
 
-  exec 9>"$LOCK_PATH"
-  flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  acquire_manager_lock
   TMP_ROOT="$(mktemp -d /tmp/hy2-safe.XXXXXXXX)"
   old_enabled="$TELEGRAM_ENABLED"
   cp --preserve=mode,ownership,timestamps -- "$CONFIG_PATH" "${TMP_ROOT}/config.yaml"
@@ -4821,8 +4907,7 @@ command_update() {
     esac
   done
 
-  exec 9>"$LOCK_PATH"
-  flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  acquire_manager_lock
   before_version="$(installed_version || true)"
   FAILURE_EVENT="update-failed"
   fetch_verified_release
@@ -4838,8 +4923,7 @@ command_sync_runtime() {
   require_root
   require_systemd
   load_existing_settings || die "请先安装 Hy2。"
-  exec 9>"$LOCK_PATH"
-  flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  acquire_manager_lock
   install_manager_copy
   ensure_service_user_and_directories
   write_systemd_units
@@ -4869,8 +4953,7 @@ command_manager_update() {
     validate_root_secret_file "$SETTINGS_PATH" "hy2-safe 设置文件"
     hy2_is_installed=1
   fi
-  exec 9>"$LOCK_PATH"
-  flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  acquire_manager_lock
   fetch_verified_manager_release
   if [[ -z "$FETCHED_MANAGER_SCRIPT" ]]; then
     info "当前已是最新 hy2-safe 管理脚本 v${PROGRAM_VERSION}。"
@@ -4882,7 +4965,7 @@ command_manager_update() {
   install -m 0755 -o root -g root "$FETCHED_MANAGER_SCRIPT" "${MANAGER_PATH}.new"
   mv -f -- "${MANAGER_PATH}.new" "$MANAGER_PATH"
   info "hy2-safe 管理脚本已更新到 ${FETCHED_MANAGER_VERSION}。"
-  flock -u 9
+  release_manager_lock
   if [[ "$hy2_is_installed" -eq 1 ]]; then
     info "正在同步已安装 Hy2 的提醒运行时。"
     "$MANAGER_PATH" sync-runtime
@@ -4905,8 +4988,7 @@ command_rotate_password() {
     return
   }
 
-  exec 9>"$LOCK_PATH"
-  flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  acquire_manager_lock
   ensure_service_user_and_directories
   TMP_ROOT="$(mktemp -d /tmp/hy2-safe.XXXXXXXX)"
   cp --preserve=mode,ownership,timestamps -- "$CONFIG_PATH" "${TMP_ROOT}/config.yaml"
@@ -5135,8 +5217,7 @@ command_uninstall() {
     }
   fi
 
-  exec 9>"$LOCK_PATH"
-  flock -n 9 || die "另一个 hy2-safe 任务正在运行。"
+  acquire_manager_lock
 
   systemctl disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
   systemctl disable --now "$TIMER_NAME" >/dev/null 2>&1 || true
