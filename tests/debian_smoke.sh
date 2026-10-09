@@ -7,7 +7,7 @@ export HY2_SAFE_SOURCE_ONLY=1
 # shellcheck source=../hy2-safe.sh
 source "${TEST_ROOT}/hy2-safe.sh"
 
-[[ "$PROGRAM_VERSION" == "1.1.9" ]]
+[[ "$PROGRAM_VERSION" == "1.1.10" ]]
 validate_domain "hy2.example.com"
 ! validate_domain "invalid_domain"
 validate_email "owner@example.com"
@@ -29,18 +29,24 @@ validate_password "0123456789abcdef"
 [[ "$(menu_item "10" "double-digit")" == "  10) double-digit" ]]
 
 manager_latest_version_for_notice() {
-  printf 'v1.1.10\n'
+  printf 'v1.1.11\n'
 }
 update_notice="$(notice_manager_update_available)"
-[[ "$update_notice" == *"发现可用的 hy2-safe 管理脚本更新：v1.1.9 → v1.1.10"* ]]
+[[ "$update_notice" == *"发现可用的 hy2-safe 管理脚本更新：v1.1.10 → v1.1.11"* ]]
 manager_latest_version_for_notice() {
-  printf 'v1.1.9\n'
+  printf 'v1.1.10\n'
 }
 [[ -z "$(notice_manager_update_available)" ]]
 manager_latest_version_for_notice() {
   return 1
 }
 [[ -z "$(notice_manager_update_available)" ]]
+
+journalctl() {
+  return 1
+}
+[[ -z "$(service_log_cursor)" ]]
+unset -f journalctl
 
 generated_password="$(random_password)"
 validate_password "$generated_password"

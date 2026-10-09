@@ -15,7 +15,7 @@ IFS=$'\n\t'
 umask 077
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.1.9"
+readonly PROGRAM_VERSION="1.1.10"
 # Hysteria's official GitHub organization was renamed from apernet to
 # HyNetworks. Keep this canonical owner in sync with the URL checks below:
 # those checks deliberately fail closed if GitHub Release metadata points to
@@ -656,7 +656,7 @@ wait_for_service() {
 }
 
 service_log_cursor() {
-  journalctl --no-pager -n 1 --show-cursor -u "$SERVICE_NAME" 2>/dev/null |
+  { journalctl --no-pager -n 1 --show-cursor -u "$SERVICE_NAME" 2>/dev/null || true; } |
     sed -n 's/^-- cursor: //p' | tail -n 1
 }
 

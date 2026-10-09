@@ -22,7 +22,7 @@ def forbid(pattern: str, message: str) -> None:
 
 
 require(r"^set -Eeuo pipefail$", "strict Bash mode is required")
-require(r'PROGRAM_VERSION="1\.1\.9"', "the release must expose its manager version")
+require(r'PROGRAM_VERSION="1\.1\.10"', "the release must expose its manager version")
 require(r"command_manager_update", "the manager must expose a self-update command")
 require(r"当前尚未安装 Hy2；管理脚本已更新", "manager updates must work before the first Hy2 install")
 require(r'\[\[ "\$relation" -eq 0 && "\$source_path" == "\$MANAGER_PATH" \]\]', "external manager launchers must still fetch a verified release")
@@ -123,6 +123,7 @@ require(r"TelegramRateLimitError", "Telegram rate limits must be distinguished f
 require(r"retry_after", "Telegram retry delays must honor the API retry_after value")
 require(r"RETRY_BASE_SECONDS = 30", "Telegram retries must use bounded exponential backoff")
 require(r"service_log_cursor", "ACME failure detection must be bounded to the current service start")
+require(r"journalctl[^\n]+2>/dev/null \|\| true", "an empty or disabled journal must not abort service startup")
 require(r"--after-cursor", "ACME failure detection must ignore stale journal entries")
 require(r"DEFAULT_RECONNECT_SUMMARY_SECONDS = 600", "reconnect summaries must default to ten minutes")
 require(r"RECONNECT_SUMMARY_INTERVALS = \{0, 300, 600, 1800, 3600\}", "reconnect summary choices must be explicitly bounded")
@@ -697,7 +698,7 @@ if README.count("```") % 2:
     raise AssertionError("README fenced code blocks must be balanced")
 if "[!IMPORTANT]" not in README or "[!WARNING]" not in README:
     raise AssertionError("README must make the main safety warnings prominent")
-if "hy2-safe v1.1.9 · Hysteria 2 管理菜单" not in README:
+if "hy2-safe v1.1.10 · Hysteria 2 管理菜单" not in README:
     raise AssertionError("README menu version must match the release")
 if "vps-security-bootstrap" not in README or "服务控制与诊断" not in README:
     raise AssertionError("README must explain firewall integration and controlled recovery")
