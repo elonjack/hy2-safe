@@ -28,7 +28,7 @@ require(r"unset PYTHONHOME PYTHONPATH PYTHONSTARTUP ENV CDPATH GLOBIGNORE", "uns
 if len(re.findall(r"/usr/bin/python3 -I", SCRIPT)) < 18:
     raise AssertionError("every embedded Python helper must use isolated mode")
 forbid(r"(?m)^\s*python3\s+(?:-|/dev/fd)", "embedded Python must use an absolute isolated interpreter")
-require(r'PROGRAM_VERSION="1\.1\.11"', "the release must expose its manager version")
+require(r'PROGRAM_VERSION="1\.1\.12"', "the release must expose its manager version")
 require(r"command_manager_update", "the manager must expose a self-update command")
 require(r"当前尚未安装 Hy2；管理脚本已更新", "manager updates must work before the first Hy2 install")
 require(r'\[\[ "\$relation" -eq 0 && "\$source_path" == "\$MANAGER_PATH" \]\]', "external manager launchers must still fetch a verified release")
@@ -227,6 +227,11 @@ require(r"stop_acme_retry_loop", "ACME failures must stop retrying before they c
 require(r"StartLimitIntervalSec=1h", "the Hysteria unit must bound repeated failures")
 require(r"StartLimitBurst=3", "the Hysteria unit must bound repeated failures")
 require(r"RestartSec=30s", "the Hysteria unit must not retry certificate failures rapidly")
+require(r'restart_hysteria_service\(\)[\s\S]*?systemctl reset-failed "\$SERVICE_NAME"[\s\S]*?systemctl restart "\$SERVICE_NAME"', "intentional restarts must clear stale systemd start limits")
+if len(re.findall(r'systemctl restart "\$SERVICE_NAME"', SCRIPT)) != 1:
+    raise AssertionError("all Hysteria restarts must use the start-limit-safe helper")
+require(r'restore_telegram_change\(\)[\s\S]*?restart_hysteria_service', "Telegram rollback must clear stale start limits")
+require(r'command_telegram_setup\(\)[\s\S]*?restart_hysteria_service', "Telegram setup must clear stale start limits")
 require(r"command_service", "the manager must expose controlled service recovery")
 require(r"ss -H -lnt", "ACME TCP conflicts must be detected before changes")
 require(r"ss -H -lun", "Hy2 UDP conflicts must be detected before changes")
@@ -719,7 +724,7 @@ if README.count("```") % 2:
     raise AssertionError("README fenced code blocks must be balanced")
 if "[!IMPORTANT]" not in README or "[!WARNING]" not in README:
     raise AssertionError("README must make the main safety warnings prominent")
-if "hy2-safe v1.1.11 · Hysteria 2 管理菜单" not in README:
+if "hy2-safe v1.1.12 · Hysteria 2 管理菜单" not in README:
     raise AssertionError("README menu version must match the release")
 if "vps-security-bootstrap" not in README or "服务控制与诊断" not in README:
     raise AssertionError("README must explain firewall integration and controlled recovery")

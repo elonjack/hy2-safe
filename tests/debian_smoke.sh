@@ -7,7 +7,7 @@ export HY2_SAFE_SOURCE_ONLY=1
 # shellcheck source=../hy2-safe.sh
 source "${TEST_ROOT}/hy2-safe.sh"
 
-[[ "$PROGRAM_VERSION" == "1.1.11" ]]
+[[ "$PROGRAM_VERSION" == "1.1.12" ]]
 validate_domain "hy2.example.com"
 ! validate_domain "invalid_domain"
 validate_email "owner@example.com"
@@ -29,12 +29,12 @@ validate_password "0123456789abcdef"
 [[ "$(menu_item "10" "double-digit")" == "  10) double-digit" ]]
 
 manager_latest_version_for_notice() {
-  printf 'v1.1.12\n'
+  printf 'v1.1.13\n'
 }
 update_notice="$(notice_manager_update_available)"
-[[ "$update_notice" == *"发现可用的 hy2-safe 管理脚本更新：v1.1.11 → v1.1.12"* ]]
+[[ "$update_notice" == *"发现可用的 hy2-safe 管理脚本更新：v1.1.12 → v1.1.13"* ]]
 manager_latest_version_for_notice() {
-  printf 'v1.1.11\n'
+  printf 'v1.1.12\n'
 }
 [[ -z "$(notice_manager_update_available)" ]]
 manager_latest_version_for_notice() {
@@ -47,6 +47,15 @@ journalctl() {
 }
 [[ -z "$(service_log_cursor)" ]]
 unset -f journalctl
+
+systemctl_calls=()
+systemctl() {
+  systemctl_calls+=("${1:-}:${2:-}")
+}
+restart_hysteria_service
+[[ "${systemctl_calls[0]}" == "reset-failed:hysteria-server.service" ]]
+[[ "${systemctl_calls[1]}" == "restart:hysteria-server.service" ]]
+unset -f systemctl
 
 acquire_manager_lock
 [[ "$(stat -c '%u:%g:%a' -- "$LOCK_DIR")" == "0:0:700" ]]
