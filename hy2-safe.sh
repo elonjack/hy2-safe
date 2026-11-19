@@ -24,7 +24,7 @@ export PATH
 unset PYTHONHOME PYTHONPATH PYTHONSTARTUP ENV CDPATH GLOBIGNORE 2>/dev/null || true
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.1.11"
+readonly PROGRAM_VERSION="1.1.12"
 # Hysteria's official GitHub organization was renamed from apernet to
 # HyNetworks. Keep this canonical owner in sync with the URL checks below:
 # those checks deliberately fail closed if GitHub Release metadata points to
@@ -736,6 +736,14 @@ wait_for_service() {
   return 0
 }
 
+restart_hysteria_service() {
+  # StartLimitIntervalSec intentionally bounds automatic retry loops, but a
+  # user-requested configuration change must not inherit an earlier failure
+  # burst. reset-failed also clears systemd's per-unit start-rate counter.
+  systemctl reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
+  systemctl restart "$SERVICE_NAME"
+}
+
 service_log_cursor() {
   { journalctl --no-pager -n 1 --show-cursor -u "$SERVICE_NAME" 2>/dev/null || true; } |
     sed -n 's/^-- cursor: //p' | tail -n 1
@@ -796,7 +804,7 @@ install_fetched_binary() {
   mv -f -- "${BIN_PATH}.new" "$BIN_PATH"
 
   if [[ "$restart_service" -eq 1 ]] && systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-    if systemctl restart "$SERVICE_NAME" && wait_for_service; then
+    if restart_hysteria_service && wait_for_service; then
       info "已更新至 ${FETCHED_VERSION}，服务运行正常。"
       return
     fi
@@ -804,7 +812,7 @@ install_fetched_binary() {
     if [[ "$had_previous" -eq 1 ]]; then
       warn "新版本启动失败，正在自动回滚。"
       install -m 0755 -o root -g root "$PREVIOUS_BIN_PATH" "$BIN_PATH"
-      systemctl restart "$SERVICE_NAME" || true
+      restart_hysteria_service || true
       wait_for_service || warn "回滚后服务仍未恢复，请检查日志。"
     fi
     journalctl --no-pager -n 30 -u "$SERVICE_NAME" >&2 || true
@@ -4309,7 +4317,7 @@ command_install() {
 
   acme_log_cursor="$(service_log_cursor)"
   systemctl enable "$SERVICE_NAME"
-  if ! systemctl restart "$SERVICE_NAME" || ! wait_for_service; then
+  if ! restart_hysteria_service || ! wait_for_service; then
     stop_acme_retry_loop "$acme_log_cursor" || true
     journalctl --no-pager -n 40 -u "$SERVICE_NAME" >&2 || true
     die "Hysteria 服务启动失败。请检查域名解析、${acme_requirement}、UDP 端口和服务日志。"
@@ -4390,7 +4398,7 @@ command_configure() {
   configure_update_timer
   configure_health_timer
   acme_log_cursor="$(service_log_cursor)"
-  if ! systemctl restart "$SERVICE_NAME" || ! wait_for_service; then
+  if ! restart_hysteria_service || ! wait_for_service; then
     if stop_acme_retry_loop "$acme_log_cursor"; then
       journalctl --no-pager -n 40 -u "$SERVICE_NAME" >&2 || true
       die "新配置已保存，但 Hysteria 因 ACME 证书申请失败而未启动；没有回滚并再次重启。请修复外部条件后运行 hy2-safe service start。"
@@ -4404,7 +4412,7 @@ command_configure() {
     AUTO_UPDATE="$old_auto_update"
     configure_update_timer
     configure_health_timer
-    systemctl restart "$SERVICE_NAME" || true
+    restart_hysteria_service || true
     wait_for_service || warn "恢复配置后服务仍未启动，请检查日志。"
     journalctl --no-pager -n 40 -u "$SERVICE_NAME" >&2 || true
     die "新配置启动失败，已恢复上一份配置。"
@@ -4427,7 +4435,7 @@ restore_telegram_change() {
     rm -f -- "$NOTIFIER_CONFIG_PATH"
   fi
   systemctl daemon-reload
-  systemctl restart "$SERVICE_NAME" || true
+  restart_hysteria_service || true
   wait_for_service || warn "恢复 Telegram 变更后 Hysteria 仍未启动，请检查日志。"
   load_existing_settings || die "恢复 Telegram 变更后无法重新读取原设置。"
   TELEGRAM_ENABLED="$old_enabled"
@@ -4556,7 +4564,7 @@ command_telegram_setup() {
     die "Telegram 提醒启用失败，已恢复原配置。"
   fi
   acme_log_cursor="$(service_log_cursor)"
-  if ! systemctl restart "$SERVICE_NAME" || ! wait_for_service; then
+  if ! restart_hysteria_service || ! wait_for_service; then
     if stop_acme_retry_loop "$acme_log_cursor"; then
       systemctl enable "$NOTIFIER_NAME" >/dev/null 2>&1 ||
         warn "Telegram 提醒已保存，但未能设为开机启动；请在 Hy2 恢复后重新运行 hy2-safe telegram-setup。"
@@ -4872,7 +4880,7 @@ command_telegram_disable() {
     restore_telegram_change "$TMP_ROOT" "$old_enabled"
     die "Telegram 提醒关闭失败，已恢复原配置。"
   fi
-  if ! systemctl restart "$SERVICE_NAME" || ! wait_for_service; then
+  if ! restart_hysteria_service || ! wait_for_service; then
     warn "关闭 Telegram 统计接口后 Hysteria 启动失败，正在回滚。"
     restore_telegram_change "$TMP_ROOT" "$old_enabled"
     die "Telegram 提醒关闭失败，已恢复原配置。"
@@ -4999,11 +5007,11 @@ command_rotate_password() {
   [[ "$PASSWORD" != "$old_password" ]] || die "新密码意外与旧密码相同，拒绝继续。"
 
   if ! write_config || ! save_settings ||
-    ! systemctl restart "$SERVICE_NAME" || ! wait_for_service; then
+    ! restart_hysteria_service || ! wait_for_service; then
     warn "新密码没有成功启用，正在恢复旧配置。"
     cp --preserve=mode,ownership,timestamps -- "${TMP_ROOT}/config.yaml" "$CONFIG_PATH"
     cp --preserve=mode,ownership,timestamps -- "${TMP_ROOT}/hy2-safe.env" "$SETTINGS_PATH"
-    systemctl restart "$SERVICE_NAME" || true
+    restart_hysteria_service || true
     wait_for_service || warn "恢复旧密码后服务仍未正常运行，请检查日志。"
     die "密码轮换失败，已恢复原密码。"
   fi
