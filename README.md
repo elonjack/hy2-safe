@@ -132,10 +132,10 @@ VPS 系统防火墙和云厂商安全组是两层不同的过滤：
 以 `root` 登录 VPS，复制下面一整行：
 
 ```bash
-apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.12/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.12/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
+apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.13/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.13/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh
 ```
 
-这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.1.12` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
+这条命令会先为最小化 Debian 补齐 CA 证书和 `curl`，下载固定的 `v1.1.13` Release 与校验文件，通过 SHA-256 后才执行本地脚本；不是直接把网络内容通过管道交给 Shell。想审查开发中的 `main` 分支，可以查看 `https://raw.githubusercontent.com/elonjack/hy2-safe/main/hy2-safe.sh`，正式安装建议使用上面的固定 Release。
 
 > [!IMPORTANT]
 > ### 旧版管理脚本的一次性引导升级
@@ -147,10 +147,10 @@ apt-get update && apt-get install -y --no-install-recommends ca-certificates cur
 > - 需要把手动下载的新版脚本写入正式管理路径 `/usr/local/sbin/hy2-safe`。
 >
 > ```bash
-> apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.12/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.12/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh manager-update
+> apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.13/hy2-safe.sh -o /root/hy2-safe.sh && curl -fL --proto '=https' --tlsv1.2 https://github.com/elonjack/hy2-safe/releases/download/v1.1.13/hy2-safe.sh.sha256 -o /root/hy2-safe.sh.sha256 && cd /root && sha256sum -c hy2-safe.sh.sha256 && chmod 0700 /root/hy2-safe.sh && /root/hy2-safe.sh manager-update-local --file /root/hy2-safe.sh --sha256 3948386b8da76419caaec90005ca1a27870a378a172111ffd70f77efcfb2f06a
 > ```
 >
-> 该命令会先验证下载的脚本，再更新管理脚本；即使当前尚未安装 Hy2，也不会创建 Hy2 服务、定时器或配置。完成这一次后，以后直接通过菜单 `16` 即可。
+> 该命令会先验证 Release 校验文件，再用文档中固定的独立 SHA-256 二次核对脚本，然后从本地文件更新管理脚本，不访问 GitHub Latest API。即使当前尚未安装 Hy2，也不会创建 Hy2 服务、定时器或配置。完成这一次后，以后可以直接通过菜单 `16` 更新。
 
 如果想先查看：
 
@@ -209,7 +209,7 @@ hy2-safe
 菜单如下：
 
 ```text
-hy2-safe v1.1.12 · Hysteria 2 管理菜单
+hy2-safe v1.1.13 · Hysteria 2 管理菜单
 
    1) 安装 Hy2
    2) 完整卸载 Hy2
@@ -279,6 +279,16 @@ hy2-safe manager-update
 ```
 
 打开已安装实例的交互菜单时，脚本会只读查询一次最新稳定 Release；如果存在更高版本，会显示提示并指向菜单 `16`。此检查不会下载、替换或重启任何服务；网络异常时也会静默跳过。选择菜单 `16` 后，脚本才会从本仓库读取最新稳定 Release，拒绝草稿、预发布和降级；随后校验固定下载地址、GitHub Asset SHA-256、Release 内置 SHA-256、文件大小和脚本版本，才原子替换管理脚本。即使手动下载的新脚本与 Release 版本号相同，只要它不是正式管理路径，菜单 `16` 仍会重新下载并验证 Release 资产后再安装。旧版会备份到 `/usr/local/sbin/hy2-safe.previous`。已经安装 Hy2 时，更新后会同步 Telegram 提醒程序、权限与 systemd 单元，但**不会重启 Hy2 服务**；尚未安装 Hy2 时也可以更新管理脚本，且不会创建服务、定时器或配置。
+
+IPv6-only、NAT64 或 WARP 共享出口可能临时遇到 GitHub API `403/429`。新版会显示 HTTP 状态、剩余请求数、重置时间或 `Retry-After`，不会再继续解析不存在的 JSON 文件。已经从固定 Release 下载脚本、并从独立渠道核对 SHA-256 后，可以完全绕过 Latest API：
+
+```bash
+hy2-safe manager-update-local \
+  --file /root/hy2-safe.sh \
+  --sha256 3948386b8da76419caaec90005ca1a27870a378a172111ffd70f77efcfb2f06a
+```
+
+本地更新会把脚本复制进 root 私有临时目录后再校验摘要和 Bash 语法，并拒绝符号链接、非 root 所有、可被组/其他用户写入或版本降级的文件。
 
 `hy2-safe update` 仍然只更新 Hysteria 官方核心；这两个更新互不混淆。
 
@@ -1125,6 +1135,6 @@ hy2-safe rotate-password
 
 ## 版本
 
-当前正式版本：`v1.1.12`
+当前正式版本：`v1.1.13`
 
 Release 页面：[elonjack/hy2-safe/releases](https://github.com/elonjack/hy2-safe/releases)

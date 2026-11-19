@@ -1,5 +1,6 @@
 from pathlib import Path
 import datetime as dt
+import hashlib
 import io
 import json
 import os
@@ -9,6 +10,7 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = (ROOT / "hy2-safe.sh").read_text(encoding="utf-8")
 README = (ROOT / "README.md").read_text(encoding="utf-8")
+SCRIPT_SHA256 = hashlib.sha256((ROOT / "hy2-safe.sh").read_bytes()).hexdigest()
 
 
 def require(pattern: str, message: str) -> None:
@@ -28,12 +30,15 @@ require(r"unset PYTHONHOME PYTHONPATH PYTHONSTARTUP ENV CDPATH GLOBIGNORE", "uns
 if len(re.findall(r"/usr/bin/python3 -I", SCRIPT)) < 18:
     raise AssertionError("every embedded Python helper must use isolated mode")
 forbid(r"(?m)^\s*python3\s+(?:-|/dev/fd)", "embedded Python must use an absolute isolated interpreter")
-require(r'PROGRAM_VERSION="1\.1\.12"', "the release must expose its manager version")
+require(r'PROGRAM_VERSION="1\.1\.13"', "the release must expose its manager version")
 require(r"command_manager_update", "the manager must expose a self-update command")
 require(r"当前尚未安装 Hy2；管理脚本已更新", "manager updates must work before the first Hy2 install")
 require(r'\[\[ "\$relation" -eq 0 && "\$source_path" == "\$MANAGER_PATH" \]\]', "external manager launchers must still fetch a verified release")
 require(r"notice_manager_update_available", "the interactive menu must check for manager updates")
 require(r"manager_latest_version_for_notice", "the update notice must use its bounded read-only check")
+require(r'github_api_download "\$MANAGER_API_URL"', "manager release metadata must use guarded GitHub API downloads")
+require(r'report_github_api_failure', "GitHub API failures must provide actionable diagnostics")
+require(r'rm -f -- "\$output" "\$headers"', "failed GitHub API downloads must remove incomplete metadata")
 require(r"发现可用的 hy2-safe 管理脚本更新", "available manager updates must be shown clearly")
 require(r"菜单 16", "the update notice must direct users to the confirmation menu option")
 require(r"MANAGER_API_URL", "manager updates must use the official GitHub Release API")
@@ -41,6 +46,11 @@ require(r"hy2-safe.sh.sha256", "manager updates must require a checksum asset")
 require(r"PREVIOUS_MANAGER_PATH", "manager updates must preserve the prior manager")
 require(r"sync-runtime", "manager updates must synchronize the notifier runtime")
 require(r"正在转交执行", "stale launchers must delegate to a newer installed manager")
+require(r"command_manager_update_local", "verified local manager updates need a dedicated command")
+require(r'manager-update-local\) command_manager_update_local', "verified local manager updates must be exposed by the CLI")
+require(r'expected_sha.*\^\[0-9a-f\]\{64\}\$', "local manager updates must require an explicit SHA-256")
+require(r'actual_sha.*sha256sum', "local manager updates must hash the staged script")
+require(r'本地管理脚本不能由组或其他用户写入', "local manager update files must reject unsafe permissions")
 
 manager_update_function = re.search(
     r"command_manager_update\(\) \{(.*?)\n\}", SCRIPT, re.DOTALL
@@ -724,8 +734,10 @@ if README.count("```") % 2:
     raise AssertionError("README fenced code blocks must be balanced")
 if "[!IMPORTANT]" not in README or "[!WARNING]" not in README:
     raise AssertionError("README must make the main safety warnings prominent")
-if "hy2-safe v1.1.12 · Hysteria 2 管理菜单" not in README:
+if "hy2-safe v1.1.13 · Hysteria 2 管理菜单" not in README:
     raise AssertionError("README menu version must match the release")
+if SCRIPT_SHA256 not in README or "RELEASE_SHA256_PLACEHOLDER" in README:
+    raise AssertionError("README local-update instructions must pin the release script SHA-256")
 if "vps-security-bootstrap" not in README or "服务控制与诊断" not in README:
     raise AssertionError("README must explain firewall integration and controlled recovery")
 if "/etc/hysteria/hy2-safe-account.env" not in README:
