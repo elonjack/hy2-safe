@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-set -x
 
 TEST_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly TEST_ROOT
@@ -51,11 +50,11 @@ unset -f journalctl
 
 systemctl_calls=()
 systemctl() {
-  systemctl_calls+=("$*")
+  systemctl_calls+=("${1:-}:${2:-}")
 }
 restart_hysteria_service
-[[ "${systemctl_calls[0]}" == "reset-failed hysteria-server.service" ]]
-[[ "${systemctl_calls[1]}" == "restart hysteria-server.service" ]]
+[[ "${systemctl_calls[0]}" == "reset-failed:hysteria-server.service" ]]
+[[ "${systemctl_calls[1]}" == "restart:hysteria-server.service" ]]
 unset -f systemctl
 
 acquire_manager_lock
