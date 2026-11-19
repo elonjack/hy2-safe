@@ -7,7 +7,7 @@ export HY2_SAFE_SOURCE_ONLY=1
 # shellcheck source=../hy2-safe.sh
 source "${TEST_ROOT}/hy2-safe.sh"
 
-[[ "$PROGRAM_VERSION" == "1.1.12" ]]
+[[ "$PROGRAM_VERSION" == "1.1.13" ]]
 validate_domain "hy2.example.com"
 ! validate_domain "invalid_domain"
 validate_email "owner@example.com"
@@ -29,12 +29,12 @@ validate_password "0123456789abcdef"
 [[ "$(menu_item "10" "double-digit")" == "  10) double-digit" ]]
 
 manager_latest_version_for_notice() {
-  printf 'v1.1.13\n'
+  printf 'v1.1.14\n'
 }
 update_notice="$(notice_manager_update_available)"
-[[ "$update_notice" == *"发现可用的 hy2-safe 管理脚本更新：v1.1.12 → v1.1.13"* ]]
+[[ "$update_notice" == *"发现可用的 hy2-safe 管理脚本更新：v1.1.13 → v1.1.14"* ]]
 manager_latest_version_for_notice() {
-  printf 'v1.1.12\n'
+  printf 'v1.1.13\n'
 }
 [[ -z "$(notice_manager_update_available)" ]]
 manager_latest_version_for_notice() {
@@ -47,6 +47,43 @@ journalctl() {
 }
 [[ -z "$(service_log_cursor)" ]]
 unset -f journalctl
+
+curl_secure() {
+  return 22
+}
+failed_metadata="$(mktemp /tmp/hy2-safe-metadata.XXXXXXXX)"
+rm -f -- "$failed_metadata"
+! manager_latest_version "$failed_metadata" 2>/dev/null
+[[ ! -e "$failed_metadata" ]]
+[[ ! -e "${failed_metadata}.headers" ]]
+unset -f curl_secure
+
+api_headers="$(mktemp /tmp/hy2-safe-api-headers.XXXXXXXX)"
+cat >"$api_headers" <<'EOF'
+HTTP/2 403
+x-ratelimit-remaining: 0
+x-ratelimit-reset: 1795092218
+retry-after: 60
+EOF
+api_error="$(report_github_api_failure "$api_headers" "测试 API" 2>&1)"
+[[ "$api_error" == *"HTTP 403"* ]]
+[[ "$api_error" == *"剩余请求数：0"* ]]
+[[ "$api_error" == *"等待 60 秒"* ]]
+rm -f -- "$api_headers"
+
+local_manager_source="$(mktemp /tmp/hy2-safe-local-manager.XXXXXXXX)"
+install -m 0600 -o root -g root "${TEST_ROOT}/hy2-safe.sh" "$local_manager_source"
+local_manager_sha="$(sha256sum "$local_manager_source" | awk '{print $1}')"
+chmod 0666 "$local_manager_source"
+! (prepare_local_manager_update "$local_manager_source" "$local_manager_sha") 2>/dev/null
+chmod 0600 "$local_manager_source"
+! (prepare_local_manager_update "$local_manager_source" "$(printf '0%.0s' {1..64})") 2>/dev/null
+prepare_local_manager_update "$local_manager_source" "$local_manager_sha"
+[[ "$FETCHED_MANAGER_VERSION" == "v1.1.13" ]]
+[[ -f "$FETCHED_MANAGER_SCRIPT" ]]
+rm -f -- "$local_manager_source"
+rm -rf -- "$TMP_ROOT"
+TMP_ROOT=""
 
 systemctl_calls=()
 systemctl() {

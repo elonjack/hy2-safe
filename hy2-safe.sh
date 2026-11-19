@@ -24,7 +24,7 @@ export PATH
 unset PYTHONHOME PYTHONPATH PYTHONSTARTUP ENV CDPATH GLOBIGNORE 2>/dev/null || true
 
 readonly PROGRAM="hy2-safe"
-readonly PROGRAM_VERSION="1.1.12"
+readonly PROGRAM_VERSION="1.1.13"
 # Hysteria's official GitHub organization was renamed from apernet to
 # HyNetworks. Keep this canonical owner in sync with the URL checks below:
 # those checks deliberately fail closed if GitHub Release metadata points to
@@ -188,6 +188,7 @@ usage() {
   hy2-safe configure [选项]
   hy2-safe update [--quiet]
   hy2-safe manager-update
+  hy2-safe manager-update-local --file FILE --sha256 SHA256
   hy2-safe rotate-password
   hy2-safe certificate-check [--quiet]
   hy2-safe show-client
@@ -389,15 +390,55 @@ curl_secure() {
     "$@"
 }
 
+report_github_api_failure() {
+  local headers="$1"
+  local label="$2"
+  local status="" remaining="" reset="" retry_after=""
+  if [[ -f "$headers" && ! -L "$headers" ]]; then
+    status="$(awk '/^HTTP\// { value=$2 } END { print value }' "$headers")"
+    remaining="$(awk -F': *' 'tolower($1) == "x-ratelimit-remaining" { gsub(/\r/, "", $2); value=$2 } END { print value }' "$headers")"
+    reset="$(awk -F': *' 'tolower($1) == "x-ratelimit-reset" { gsub(/\r/, "", $2); value=$2 } END { print value }' "$headers")"
+    retry_after="$(awk -F': *' 'tolower($1) == "retry-after" { gsub(/\r/, "", $2); value=$2 } END { print value }' "$headers")"
+  fi
+  if [[ "$status" == "403" || "$status" == "429" ]]; then
+    warn "${label}返回 HTTP ${status}，GitHub API 可能正在限制当前出口 IP。"
+    [[ -z "$remaining" ]] || warn "GitHub API 剩余请求数：${remaining}。"
+    [[ -z "$reset" ]] || warn "GitHub API 重置时间戳：${reset}（Unix UTC）。"
+    [[ -z "$retry_after" ]] || warn "GitHub 要求等待 ${retry_after} 秒后再试。"
+    warn "请等待后重试；若已下载固定 Release，可使用 manager-update-local 并提供独立核对的 SHA-256。"
+  elif [[ -n "$status" ]]; then
+    warn "${label}请求失败，GitHub 返回 HTTP ${status}。"
+  else
+    warn "${label}请求失败，未收到可解析的 GitHub HTTP 状态。"
+  fi
+}
+
+github_api_download() {
+  local url="$1"
+  local output="$2"
+  local label="$3"
+  local headers="${output}.headers"
+  rm -f -- "$output" "$headers"
+  if curl_secure \
+    --max-filesize 1048576 \
+    --dump-header "$headers" \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "$url" \
+    --output "$output"; then
+    rm -f -- "$headers"
+    return 0
+  fi
+  report_github_api_failure "$headers" "$label"
+  rm -f -- "$output" "$headers"
+  return 1
+}
+
 latest_version() {
   local metadata="$1"
   local version
-  curl_secure \
-    --max-filesize 1048576 \
-    -H 'Accept: application/vnd.github+json' \
-    -H 'X-GitHub-Api-Version: 2022-11-28' \
-    "$API_URL" \
-    --output "$metadata"
+  github_api_download "$API_URL" "$metadata" "Hysteria GitHub Release API" ||
+    die "无法读取 Hysteria GitHub Release API。"
   version="$(
     /usr/bin/python3 -I - "$metadata" <<'PY'
 import json
@@ -465,18 +506,14 @@ PY
 
 manager_latest_version() {
   local metadata="$1"
-  curl_secure \
-    --max-filesize 1048576 \
-    -H 'Accept: application/vnd.github+json' \
-    -H 'X-GitHub-Api-Version: 2022-11-28' \
-    "$MANAGER_API_URL" \
-    --output "$metadata"
+  github_api_download "$MANAGER_API_URL" "$metadata" "hy2-safe GitHub Release API" ||
+    return 1
   parse_manager_latest_version "$metadata"
 }
 
 manager_latest_version_for_notice() {
   local metadata="$1"
-  curl \
+  if ! curl \
     --fail \
     --location \
     --silent \
@@ -491,7 +528,10 @@ manager_latest_version_for_notice() {
     -H 'Accept: application/vnd.github+json' \
     -H 'X-GitHub-Api-Version: 2022-11-28' \
     "$MANAGER_API_URL" \
-    --output "$metadata"
+    --output "$metadata"; then
+    rm -f -- "$metadata"
+    return 1
+  fi
   parse_manager_latest_version "$metadata"
 }
 
@@ -4946,6 +4986,69 @@ command_sync_runtime() {
   info "hy2-safe 管理脚本与提醒运行时已同步；Hy2 服务未重启。"
 }
 
+validate_local_manager_file() {
+  local file="$1"
+  local owner permissions size
+  [[ -f "$file" && ! -L "$file" && -r "$file" ]] ||
+    die "本地管理脚本必须是可读的普通文件且不能是符号链接：$file"
+  owner="$(stat -c '%u' -- "$file")"
+  permissions="$(stat -c '%a' -- "$file")"
+  size="$(stat -c '%s' -- "$file")"
+  [[ "$owner" == "0" ]] || die "本地管理脚本必须由 root 拥有：$file"
+  [[ "$permissions" =~ ^[0-7]{3,4}$ ]] || die "无法判断本地管理脚本权限：$file"
+  (( (8#$permissions & 0022) == 0 )) ||
+    die "本地管理脚本不能由组或其他用户写入：$file"
+  [[ "$size" =~ ^[1-9][0-9]{0,6}$ && "$size" -le 2097152 ]] ||
+    die "本地管理脚本大小异常，拒绝安装：$file"
+}
+
+prepare_local_manager_update() {
+  local source_file="$1"
+  local expected_sha="${2,,}"
+  local staged_file actual_sha reported_version relation
+  [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] ||
+    die "--sha256 必须是独立核对过的 64 位十六进制 SHA-256。"
+  validate_local_manager_file "$source_file"
+  TMP_ROOT="$(mktemp -d /tmp/hy2-safe.XXXXXXXX)"
+  staged_file="${TMP_ROOT}/hy2-safe.sh"
+  install -m 0600 -o root -g root -- "$source_file" "$staged_file"
+  actual_sha="$(sha256sum "$staged_file" | awk '{print $1}')"
+  [[ "${actual_sha,,}" == "$expected_sha" ]] ||
+    die "本地管理脚本 SHA-256 不匹配，拒绝安装。"
+  bash -n "$staged_file" || die "本地管理脚本 Bash 语法无效。"
+  reported_version="$(sed -n 's/^readonly PROGRAM_VERSION="\([0-9][0-9.]*\)"$/\1/p' "$staged_file" | head -n 1)"
+  [[ "$reported_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    die "无法从本地管理脚本读取有效版本号。"
+  relation="$(compare_versions "v${reported_version}" "v${PROGRAM_VERSION}")" ||
+    die "无法比较本地管理脚本版本。"
+  [[ "$relation" -ge 0 ]] ||
+    die "本地管理脚本 v${reported_version} 低于当前 v${PROGRAM_VERSION}，拒绝降级。"
+  FETCHED_MANAGER_VERSION="v${reported_version}"
+  FETCHED_MANAGER_SCRIPT="$staged_file"
+}
+
+install_fetched_manager_update() {
+  local hy2_is_installed="$1"
+  if [[ -z "$FETCHED_MANAGER_SCRIPT" ]]; then
+    release_manager_lock
+    info "当前已是最新 hy2-safe 管理脚本 v${PROGRAM_VERSION}。"
+    return
+  fi
+  if [[ -f "$MANAGER_PATH" && ! -L "$MANAGER_PATH" ]]; then
+    cp --preserve=mode,ownership,timestamps -- "$MANAGER_PATH" "$PREVIOUS_MANAGER_PATH"
+  fi
+  install -m 0755 -o root -g root "$FETCHED_MANAGER_SCRIPT" "${MANAGER_PATH}.new"
+  mv -f -- "${MANAGER_PATH}.new" "$MANAGER_PATH"
+  info "hy2-safe 管理脚本已更新到 ${FETCHED_MANAGER_VERSION}。"
+  release_manager_lock
+  if [[ "$hy2_is_installed" -eq 1 ]]; then
+    info "正在同步已安装 Hy2 的提醒运行时。"
+    "$MANAGER_PATH" sync-runtime
+  else
+    info "当前尚未安装 Hy2；管理脚本已更新，未创建服务、定时器或配置。"
+  fi
+}
+
 command_manager_update() {
   local hy2_is_installed=0
   require_root
@@ -4963,23 +5066,42 @@ command_manager_update() {
   fi
   acquire_manager_lock
   fetch_verified_manager_release
-  if [[ -z "$FETCHED_MANAGER_SCRIPT" ]]; then
-    info "当前已是最新 hy2-safe 管理脚本 v${PROGRAM_VERSION}。"
-    return
+  install_fetched_manager_update "$hy2_is_installed"
+}
+
+command_manager_update_local() {
+  local hy2_is_installed=0
+  local source_file="" expected_sha=""
+  require_root
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --file)
+        [[ "$#" -ge 2 ]] || die "--file 缺少参数。"
+        source_file="$2"
+        shift 2
+        ;;
+      --sha256)
+        [[ "$#" -ge 2 ]] || die "--sha256 缺少参数。"
+        expected_sha="$2"
+        shift 2
+        ;;
+      -h | --help)
+        printf '用法：hy2-safe manager-update-local --file FILE --sha256 SHA256\n'
+        printf '仅安装 root 拥有、不可被组/其他用户写入，且与独立 SHA-256 匹配的本地脚本。\n'
+        return
+        ;;
+      *) die "manager-update-local 的未知选项：$1" ;;
+    esac
+  done
+  [[ -n "$source_file" ]] || die "manager-update-local 缺少 --file。"
+  [[ -n "$expected_sha" ]] || die "manager-update-local 缺少 --sha256。"
+  if [[ -f "$SETTINGS_PATH" ]]; then
+    validate_root_secret_file "$SETTINGS_PATH" "hy2-safe 设置文件"
+    hy2_is_installed=1
   fi
-  if [[ -f "$MANAGER_PATH" && ! -L "$MANAGER_PATH" ]]; then
-    cp --preserve=mode,ownership,timestamps -- "$MANAGER_PATH" "$PREVIOUS_MANAGER_PATH"
-  fi
-  install -m 0755 -o root -g root "$FETCHED_MANAGER_SCRIPT" "${MANAGER_PATH}.new"
-  mv -f -- "${MANAGER_PATH}.new" "$MANAGER_PATH"
-  info "hy2-safe 管理脚本已更新到 ${FETCHED_MANAGER_VERSION}。"
-  release_manager_lock
-  if [[ "$hy2_is_installed" -eq 1 ]]; then
-    info "正在同步已安装 Hy2 的提醒运行时。"
-    "$MANAGER_PATH" sync-runtime
-  else
-    info "当前尚未安装 Hy2；管理脚本已更新，未创建服务、定时器或配置。"
-  fi
+  acquire_manager_lock
+  prepare_local_manager_update "$source_file" "$expected_sha"
+  install_fetched_manager_update "$hy2_is_installed"
 }
 
 command_rotate_password() {
@@ -5424,6 +5546,7 @@ main() {
     configure) command_configure "$@" ;;
     update) command_update "$@" ;;
     manager-update) command_manager_update "$@" ;;
+    manager-update-local) command_manager_update_local "$@" ;;
     sync-runtime) command_sync_runtime "$@" ;;
     rotate-password) command_rotate_password "$@" ;;
     certificate-check) command_certificate_check "$@" ;;
